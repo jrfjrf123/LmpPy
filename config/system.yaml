@@ -1,0 +1,9 @@
+# system.yaml - 体系配置
+# 定义体系名称和CG映射文件
+
+system:
+  name: "环氧树脂固化体系"
+  mapping_files:
+    - path: "mapping/mapping_epoxy.yaml"
+      copies: 1
+  mass_list: "mass_list.yaml"

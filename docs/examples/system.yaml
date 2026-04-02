@@ -1,0 +1,23 @@
+# system.yaml - 体系配置示例
+# 基于 mini_test 示例
+
+system:
+  # 体系名称
+  name: "Mini Test System"
+
+  # 全局 bead 类型名称映射 (必需)
+  # 所有 mapping 文件中的 site_types 名称必须在此定义
+  # 这确保多个 mapping 文件中相同名称的 bead 使用相同的类型 ID
+  bead_type_names:
+    Bead1: 1    # 主要珠子
+    Bead2: 2    # 次要珠子
+    Bead3: 3    # 末端珠子
+
+  # CG映射文件列表
+  # 支持多个 mapping 文件，每个可以指定多个拷贝
+  mapping_files:
+    - path: "mapping.yaml"
+      copies: 1        # 分子拷贝数
+
+  # 质量列表文件路径 (可选，若不指定则从 data_file 自动提取)
+  # mass_list: "mass_list.yaml"

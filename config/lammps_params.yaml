@@ -1,0 +1,39 @@
+# lammps_params.yaml - LAMMPS运行参数配置
+
+simulation:
+  loop_num: 25000           # 循环次数
+  dt: 0.001                 # 时间步长 (ps)
+  temperature: 400          # 温度 (K)
+  pressure: 1.0             # 压力 (atm)
+
+steps:
+  bond_react_check: 1       # 键反应检查步数
+  run_per_loop: 50          # 每个loop运行步数
+  nve_limit: 20             # NVE limit步数
+
+npt:
+  tcouple: 100              # 温度耦合常数
+  pcouple: 1000             # 压力耦合常数
+
+bond_react:
+  stabilization: 0.03       # stabilization参数
+  reactions:
+    - name: "rxn1"
+      cutoff: 3.0           # 反应截断半径
+      map_file: "rxn1.map"
+      pre_mol: "mol1"
+      post_mol: "mol2"
+    - name: "rxn2"
+      cutoff: 3.0
+      map_file: "rxn2.map"
+      pre_mol: "mol3"
+      post_mol: "mol4"
+
+files:
+  input_script: "in.epoxy.stabilized"
+  initial_cg_mapping: "AtomId_BeadId_compare_list.csv"
+  output_cg_trajectory: "test_cg.lammpstrj"
+  output_reaction_count: "reaction_num.txt"
+  output_final_data: "final_frame.data"
+  output_final_mapping: "final_cg_compare_list.csv"
+  output_bonds_record: "bonds_record.npz"

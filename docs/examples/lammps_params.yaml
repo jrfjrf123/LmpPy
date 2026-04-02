@@ -1,0 +1,88 @@
+# lammps_params.yaml - LAMMPS运行参数配置示例
+# 基于 mini_test 示例
+#
+# 注意: 所有文件路径均为相对于本配置文件所在目录的相对路径
+
+# ============================================
+# 模拟基本参数
+# ============================================
+simulation:
+  loop_num: 5              # 主循环次数
+  dt: 0.001                # 时间步长 (ps)
+  timestep: 1              # LAMMPS timestep 设置 (fs)
+  temperature: 400         # 目标温度 (K)
+  pressure: 1.0            # 目标压力 (atm)
+  ensemble: "npt"          # 系综类型: "npt" (控温控压) 或 "nvt" (仅控温)
+
+# ============================================
+# 步数配置
+# ============================================
+steps:
+  bond_react_check: 1      # 键反应检查步数
+  run_per_loop: 50         # 每个loop运行的总步数
+  nve_limit: 20            # NVE/limit步数 (反应原子弛豫)
+
+  # 注意: run_per_loop > nve_limit + bond_react_check
+  # normal_npt_step = run_per_loop - nve_limit - bond_react_check
+
+# ============================================
+# NPT控温控压参数
+# ============================================
+npt:
+  tcouple: 100             # 温度耦合常数 (fs)
+  pcouple: 1000            # 压力耦合常数 (fs)
+
+# ============================================
+# Bond/React配置
+# ============================================
+bond_react:
+  stabilization: 0.03      # stabilization参数 (Å)
+
+  # 反应列表
+  # map_file, pre_template, post_template: 相对于配置目录的文件名
+  # pre_mapping, post_mapping: CG 映射文件 (用于 CG 转换)
+  reactions:
+    - name: "rxn1"
+      cutoff: 5.0                    # 反应截断半径 (Å)
+      map_file: "rxn1.map"           # bond/react map 文件
+      pre_mol: "mol1"                # 反应前分子模板名
+      post_mol: "mol2"               # 反应后分子模板名
+      pre_template: "rxn1_pre.lammpstemplate"
+      post_template: "rxn1_post.lammpstemplate"
+      pre_mapping: "rxn1_pre_mapping.yaml"    # 反应前 CG 映射
+      post_mapping: "rxn1_post_mapping.yaml"  # 反应后 CG 映射
+
+# ============================================
+# 分子模板配置
+# ============================================
+# molecule 命令使用的模板文件
+molecules:
+  mol1: "rxn1_pre.lammpstemplate"
+  mol2: "rxn1_post.lammpstemplate"
+
+# ============================================
+# 输入输出文件配置
+# ============================================
+files:
+  # 输入文件
+  data_file: "mini_test.data"
+  initial_cg_mapping: "AtomId_BeadId_compare_list.csv"
+
+  # read_data 额外参数
+  read_data_extra:
+    special_per_atom: 3
+    bond_per_atom: 3
+    angle_per_atom: 3
+    dihedral_per_atom: 3
+
+  # 输出文件
+  output_cg_trajectory: "cg_trajectory.lammpstrj"
+  output_reaction_count: "reaction_num.txt"
+  output_final_data: "final_frame.data"
+  output_final_mapping: "final_cg_compare_list.csv"
+  output_bonds_record: "bonds_record.npz"
+
+  # CG 拓扑输出
+  output_cg_bonds: "cg_bonds.txt"
+  output_cg_angles: "cg_angles.txt"
+  output_cg_dihedrals: "cg_dihedrals.txt"
