@@ -1,8 +1,8 @@
 # LmpPy - LAMMPS Bond/React 后处理框架
 
-> 版本: 2.0
+> 版本: 2.1
 > 作者: Claude
-> 日期: 2026-03-28
+> 日期: 2026-04-02
 
 ## 目录
 
@@ -16,8 +16,12 @@
 - [继续计算功能](#继续计算功能)
 - [输出文件说明](#输出文件说明)
 - [模块API参考](#模块api参考)
+- [工具模块API参考](#工具模块-api-参考)
+- [工具脚本使用指南](#工具脚本使用指南)
+- [IBM势能计算配置文件](#ibm势能计算配置文件)
 - [使用教程](#使用教程)
 - [常见问题](#常见问题)
+- [更新日志](#更新日志)
 
 ---
 
@@ -72,11 +76,32 @@ LmpPy/
 │   ├── cg_topology.py             # CG拓扑推导
 │   ├── cg_initializer.py          # CG系统初始化
 │   └── bonds_recorder.py          # 键连表输出器
+├── tools/                         # 工具模块 (新增)
+│   ├── aa2cg/                     # AA→CG转换工具
+│   │   ├── data_converter.py      # LAMMPS data转换
+│   │   ├── trj_converter.py       # 轨迹转换
+│   │   └── mapping_utils.py       # 映射工具函数
+│   ├── ibm_potential/             # IBM势能计算
+│   │   ├── config.py              # 配置加载器
+│   │   ├── distribution.py        # 分布计算
+│   │   ├── boltzmann.py           # 玻尔兹曼反演
+│   │   └── lammps_table.py        # LAMMPS表生成
+│   └── smooth_utils/              # 分布平滑工具包
+│       ├── core.py                # 核心平滑算法
+│       ├── cli.py                 # 命令行入口
+│       └── ...                    # 其他平滑模块
 ├── utils/                         # 工具函数
 │   ├── __init__.py
 │   ├── coordinate_utils.py        # 坐标处理
 │   ├── file_utils.py              # 文件I/O
-│   └── graph_utils.py             # 图论算法
+│   ├── graph_utils.py             # 图论算法
+│   ├── topology.py                # 拓扑文件读写 (新增)
+│   └── units.py                   # 单位转换 (新增)
+├── scripts/                       # 脚本入口 (新增)
+│   ├── generate_initial_mapping.py  # 初始CG映射生成
+│   ├── smooth_distribution.py       # 分布平滑CLI
+│   ├── convert_aa2cg.py             # AA→CG转换CLI
+│   └── calc_ibm_potential.py        # IBM势能计算CLI
 ├── docs/                          # 文档和示例
 │   └── examples/                  # 示例配置文件
 ├── run_refactored.py              # 主程序入口
@@ -684,6 +709,125 @@ cg_bonds = atom_bonds_to_cg_bonds(
 
 ---
 
+## 工具模块 API 参考
+
+### 导入工具模块
+
+```python
+# AA→CG转换工具
+from LmpPy.tools.aa2cg import (
+    load_aa_to_cg_mapping,
+    convert_aa_to_cg_frame,
+    read_lammps_data,
+    write_cg_data_file,
+    read_gromacs_trr_all_frames,
+    convert_trajectory_to_cg,
+    save_cg_trajectory_pickle,
+)
+
+# IBM势能计算工具
+from LmpPy.tools.ibm_potential import (
+    load_ibm_config,
+    load_cg_trajectory,
+    calculate_bond_distribution,
+    calculate_bond_potential,
+    create_lammps_table_files,
+)
+
+# 分布平滑工具
+from LmpPy.tools.smooth_utils import (
+    smooth_distribution,
+    smooth_bond_with_harmonic_boundary,
+    smooth_dihedral_periodic,
+)
+
+# 工具函数
+from LmpPy.utils import (
+    read_topology_files,
+    convert_energy,
+    UnitConverter,
+)
+```
+
+### AA→CG转换工具
+
+```python
+from LmpPy.tools.aa2cg import (
+    load_aa_to_cg_mapping,
+    read_gromacs_trr_all_frames,
+    convert_trajectory_to_cg,
+    save_cg_trajectory_pickle,
+)
+
+# 加载CG映射
+mapping = load_aa_to_cg_mapping("AtomId_BeadId_compare_list.csv")
+
+# 读取GROMACS轨迹
+aa_frames = read_gromacs_trr_all_frames("topol.tpr", "traj.trr")
+
+# 转换为CG轨迹
+cg_traj = convert_trajectory_to_cg(aa_frames, "mapping.csv")
+
+# 保存为pickle
+save_cg_trajectory_pickle(cg_traj, "cg_trajectory.pkl")
+```
+
+### IBM势能计算工具
+
+```python
+from LmpPy.tools.ibm_potential import (
+    load_ibm_config,
+    load_cg_trajectory,
+    calculate_bond_distribution,
+    calculate_bond_potential,
+    create_lammps_table_files,
+)
+
+# 加载配置
+config = load_ibm_config("ibm_potential.yaml")
+
+# 加载CG轨迹
+cg_data = load_cg_trajectory(config.trajectory.path)
+
+# 计算键分布
+r, hist = calculate_bond_distribution(cg_data, bond_pairs)
+
+# 玻尔兹曼反演
+r, U = calculate_bond_potential(r, hist, temperature=400)
+
+# 生成LAMMPS table文件
+create_lammps_table_files("potentials_output", "lammps_tables")
+```
+
+### 分布平滑工具
+
+```python
+from LmpPy.tools.smooth_utils import smooth_distribution
+
+# 平滑单个分布文件
+smoothed_path, result = smooth_distribution(
+    "bond_type1_dist.txt",
+    output_dir="smoothed_output",
+    temperature=400
+)
+```
+
+### 工具函数
+
+```python
+from LmpPy.utils import read_topology_files, UnitConverter
+
+# 读取拓扑文件
+topo = read_topology_files("cg_bonds.txt", "cg_angles.txt", "cg_dihedrals.txt")
+
+# 单位转换
+converter = UnitConverter()
+kt = converter.kt(400)  # kT at 400 K
+energy_kJ = converter.convert_energy(1.0, 'kcal/mol', 'kJ/mol')
+```
+
+---
+
 ## 使用教程
 
 ### 教程1: 创建新体系
@@ -839,6 +983,119 @@ sed -i 's/\t/  /g' *.yaml
 
 ---
 
+## 工具脚本使用指南
+
+### 分布平滑工具
+
+```bash
+# 处理单个分布文件
+python -m LmpPy.scripts.smooth_distribution bond_type1_dist.txt -o smoothed_output/
+
+# 处理目录下所有分布文件
+python -m LmpPy.scripts.smooth_distribution -d distributions/ -o smoothed_output/
+
+# 指定温度
+python -m LmpPy.scripts.smooth_distribution bond_type1_dist.txt -T 300 -o smoothed_output/
+```
+
+### AA→CG转换工具
+
+```bash
+# 轨迹转换 (GROMACS TRR)
+python -m LmpPy.scripts.convert_aa2cg trj \
+    --tpr topol.tpr \
+    --trr traj.trr \
+    --mapping mapping.csv \
+    -o cg_trajectory.pkl
+
+# Data文件转换
+python -m LmpPy.scripts.convert_aa2cg data \
+    --input system.data \
+    --mapping mapping.csv \
+    --bonds cg_bonds.txt \
+    -o cg.data
+```
+
+### IBM势能计算工具
+
+```bash
+# 使用配置文件
+python -m LmpPy.scripts.calc_ibm_potential -c ibm_potential.yaml
+
+# 使用默认配置（在配置目录下运行）
+python -m LmpPy.scripts.calc_ibm_potential
+
+# 安静模式
+python -m LmpPy.scripts.calc_ibm_potential -c ibm_potential.yaml -q
+```
+
+---
+
+## IBM势能计算配置文件
+
+IBM势能计算流程使用独立的配置文件 `ibm_potential.yaml`：
+
+```yaml
+# ============================================
+# 模拟参数
+# ============================================
+simulation:
+  temperature: 400          # 温度 (K)
+  units: real               # 单位系统: real (kcal/mol), metal (eV), lj
+
+# ============================================
+# 轨迹输入
+# ============================================
+trajectory:
+  format: pickle            # 格式: pickle | lammpsdump
+  path: cg_trajectory.pkl   # 轨迹文件路径
+  stride: 1                 # 帧间隔 (跳帧)
+
+# ============================================
+# 分布计算参数
+# ============================================
+distribution:
+  n_bins: 200               # 直方图bins数
+  bond_range: [0.5, 6.0]    # 键长范围 (Å)
+  angle_range: [0, 180]     # 角度范围 (degrees)
+  dihedral_range: [-180, 180]  # 二面角范围 (degrees)
+  pair_range: [1.5, 18.0]   # RDF范围 (Å)
+  rdf_dr: 0.01              # RDF bin宽度 (Å)
+  rdf_exclude_bonds: true   # RDF排除键合对
+  rdf_exclude_angles: true  # RDF排除1-3对
+  rdf_exclude_dihedrals: true  # RDF排除1-4对
+
+# ============================================
+# 平滑参数
+# ============================================
+smoothing:
+  method: auto              # 方法: auto | harmonic | gaussian
+  sg_window: 21             # Savitzky-Golay窗口大小
+  sg_polyorder: 3           # Savitzky-Golay多项式阶数
+  sigma_range: [2.0, 3.0, 5.0, 7.0]  # Gaussian平滑sigma范围
+
+# ============================================
+# 输出配置
+# ============================================
+output:
+  table_dir: lammps_tables        # LAMMPS表文件目录
+  potentials_dir: potentials_output  # 势能文件目录
+  distributions_dir: distributions_output  # 分布文件目录
+  generate_plots: true            # 是否生成图表
+  generate_reference: true        # 是否生成参考文件
+```
+
+**参数说明：**
+
+| 参数 | 说明 |
+|------|------|
+| `trajectory.format` | 轨迹格式，pickle支持快速加载，lammpsdump为标准LAMMPS dump格式 |
+| `stride` | 帧间隔，用于减少计算量 |
+| `rdf_exclude_*` | RDF计算时排除直接键合、1-3、1-4相互作用对 |
+| `method` | 平滑方法：auto自动选择，harmonic用于bond/angle，gaussian用于dihedral |
+
+---
+
 ## 许可证
 
 MIT License
@@ -846,6 +1103,20 @@ MIT License
 ---
 
 ## 更新日志
+
+### v2.1 (2026-04-02)
+- 新增工具模块 (`LmpPy/tools/`)
+  - `aa2cg`: 全原子→粗粒化转换工具
+  - `ibm_potential`: IBM势能计算流程
+  - `smooth_utils`: 分布平滑工具包
+- 新增CLI脚本 (`LmpPy/scripts/`)
+  - `smooth_distribution.py`: 分布平滑命令行工具
+  - `convert_aa2cg.py`: AA→CG转换命令行工具
+  - `calc_ibm_potential.py`: IBM势能计算命令行工具
+- 新增工具函数 (`LmpPy/utils/`)
+  - `topology.py`: 拓扑文件读写工具
+  - `units.py`: 单位转换工具
+- 支持 pickle 和 LAMMPS dump 双轨迹格式
 
 ### v2.0 (2026-03-28)
 - 添加 `CGCompareList.from_csv()` 方法支持加载已有CG映射
