@@ -5,12 +5,27 @@
 - 输入: GROMACS TPR/TRR, LAMMPS dump
 - 输出: pickle格式, LAMMPS dump格式, XYZ格式
 
+用法:
+    # 作为模块运行（推荐）
+    python -m LmpPy.tools.aa2cg.trj_converter <tpr_file> <trr_file> <mapping_csv> [output_pickle]
+
+    # 直接运行（需要正确设置 PYTHONPATH）
+    python trj_converter.py <tpr_file> <trr_file> <mapping_csv> [output_pickle]
+
 作者: 整合自 md_base_on_ml/AA_trj2CG_trj/AA_trj2CG_trj.py
 """
 
+import sys
+from pathlib import Path
+
+# 支持直接运行脚本
+if __name__ == "__main__":
+    _project_root = Path(__file__).resolve().parent.parent.parent.parent
+    if str(_project_root) not in sys.path:
+        sys.path.insert(0, str(_project_root))
+
 import numpy as np
 import pickle
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # 尝试导入MDAnalysis（可选依赖）
@@ -20,7 +35,7 @@ try:
 except ImportError:
     HAS_MDA = False
 
-from .mapping_utils import (
+from LmpPy.tools.aa2cg.mapping_utils import (
     load_aa_to_cg_mapping,
     convert_aa_to_cg_frame,
     wrap_coords

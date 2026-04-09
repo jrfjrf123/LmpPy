@@ -7,6 +7,8 @@
 - 从CG轨迹计算各种分布
 - 支持LAMMPS dump和pickle格式轨迹
 - 支持排除1-2/1-3/1-4键合对
+- 支持多进程并行计算
+- 向量化计算提高性能
 
 作者: 整合自 md_base_on_ml/calc_ibm_pot/300DGEBA_150PPD/calculate_all_bonded_dist_dump.py
 """
@@ -14,9 +16,27 @@
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 from collections import defaultdict
+from functools import partial
 import warnings
+
+# 从 coordinate_utils 导入 pbc_distance，避免重复实现
+from LmpPy.utils.coordinate_utils import pbc_distance
+
+# 可选导入 tqdm 和 multiprocessing
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
+    tqdm = lambda x, **kwargs: x
+
+try:
+    from multiprocessing import Pool
+    HAS_MULTIPROCESSING = True
+except ImportError:
+    HAS_MULTIPROCESSING = False
 
 
 def load_cg_trajectory(data_path: str, format: str = 'auto') -> Dict:
@@ -169,13 +189,6 @@ def load_type_dict(file_path: str, n_cols: int) -> Dict:
     return type_dict
 
 
-def pbc_distance(pos1: np.ndarray, pos2: np.ndarray, box: np.ndarray) -> np.ndarray:
-    """计算PBC-aware距离"""
-    delta = pos2 - pos1
-    delta -= box * np.round(delta / box)
-    return np.linalg.norm(delta, axis=-1)
-
-
 def calculate_bond_distribution(cg_data: Dict, bond_pairs: np.ndarray,
                                 n_bins: int = 100,
                                 custom_range: Tuple[float, float] = None,
@@ -199,10 +212,16 @@ def calculate_bond_distribution(cg_data: Dict, bond_pairs: np.ndarray,
         coords = cg_data['R'][i]
         box = cg_data['cell'][i]
 
+        if box.ndim == 1:
+            box = np.column_stack((np.zeros(3), box))
+        elif box.ndim > 2:
+            raise ValueError(f"无效的box格式: {box.shape}")
+
         bead1 = coords[bond_pairs[0] - 1]
         bead2 = coords[bond_pairs[1] - 1]
 
-        distances = pbc_distance(bead1, bead2, box)
+        delta = pbc_distance(bead1, bead2, box)
+        distances = np.linalg.norm(delta, axis=-1)
         all_lengths.extend(distances)
 
     hist, edges = np.histogram(all_lengths, bins=n_bins, range=custom_range, density=True)
@@ -323,132 +342,303 @@ def build_exclusion_pairs(bonds_df: pd.DataFrame, angles_df: pd.DataFrame,
                           dihedrals_df: pd.DataFrame,
                           exclude_bonds: bool = True,
                           exclude_angles: bool = True,
-                          exclude_dihedrals: bool = True) -> np.ndarray:
-    """构建排除对列表（1-2, 1-3, 1-4）"""
-    excluded_pairs = set()
-
-    if exclude_bonds and len(bonds_df) > 0:
-        for _, row in bonds_df.iterrows():
-            pair = tuple(sorted((int(row['atom1_id']), int(row['atom2_id']))))
-            excluded_pairs.add(pair)
-
-    if exclude_angles and len(angles_df) > 0:
-        for _, row in angles_df.iterrows():
-            pair = tuple(sorted((int(row['atom1_id']), int(row['atom3_id']))))
-            excluded_pairs.add(pair)
-
-    if exclude_dihedrals and len(dihedrals_df) > 0:
-        for _, row in dihedrals_df.iterrows():
-            pair = tuple(sorted((int(row['atom1_id']), int(row['atom4_id']))))
-            excluded_pairs.add(pair)
-
-    return np.array(sorted(list(excluded_pairs)), dtype=np.int32) if excluded_pairs else np.array([], dtype=np.int32).reshape(0, 2)
-
-
-def calculate_rdf(cg_data: Dict, bead_info: pd.DataFrame,
-                  type1: int, type2: int,
-                  bonds_df: pd.DataFrame = None,
-                  angles_df: pd.DataFrame = None,
-                  dihedrals_df: pd.DataFrame = None,
-                  exclude_bonds: bool = True,
-                  exclude_angles: bool = True,
-                  exclude_dihedrals: bool = True,
-                  n_bins: int = 100,
-                  custom_range: Tuple[float, float] = None,
-                  dr: float = 0.01,
-                  output_file: str = None) -> Tuple[np.ndarray, np.ndarray]:
+                          exclude_dihedrals: bool = True) -> Set[Tuple[int, int]]:
     """
-    计算径向分布函数(RDF)。
+    构建排除对列表（1-2, 1-3, 1-4键合对）。
 
     Args:
-        cg_data: CG轨迹数据
-        bead_info: bead信息DataFrame
-        type1, type2: bead类型
-        bonds_df, angles_df, dihedrals_df: 拓扑DataFrame
-        exclude_bonds/angles/dihedrals: 是否排除1-2/1-3/1-4对
-        n_bins: bins数
-        custom_range: 范围
-        dr: RDF bin宽度
-        output_file: 输出文件
+        bonds_df: 键 DataFrame，需包含 'atom1_id', 'atom2_id' 列
+        angles_df: 角度 DataFrame，需包含 'atom1_id', 'atom3_id' 列
+        dihedrals_df: 二面角 DataFrame，需包含 'atom1_id', 'atom4_id' 列
+        exclude_bonds: 是否排除1-2键合对
+        exclude_angles: 是否排除1-3键合对
+        exclude_dihedrals: 是否排除1-4键合对
 
     Returns:
-        (r, g_r): 距离和RDF数组
+        排除对集合，每个元素为 (atom_id1, atom_id2) 排序后的元组
     """
-    # 获取指定类型的bead ID
+    excluded_pairs = set()
+
+    # 自动检测列名（兼容不同格式）
+    def get_atom_ids(df, cols):
+        if df.empty or len(df) == 0:
+            return []
+        # 尝试不同的列名格式
+        for col_variants in cols:
+            if all(c in df.columns for c in col_variants):
+                return [(int(row[col_variants[0]]), int(row[col_variants[1]]))
+                        for _, row in df.iterrows()]
+        return []
+
+    # 1-2 排除（键两端的原子）
+    if exclude_bonds and bonds_df is not None and len(bonds_df) > 0:
+        bond_pairs = get_atom_ids(bonds_df, [['atom1_id', 'atom2_id'], ['atom1', 'atom2']])
+        for a1, a2 in bond_pairs:
+            excluded_pairs.add(tuple(sorted((a1, a2))))
+
+    # 1-3 排除（角度两端的原子）
+    if exclude_angles and angles_df is not None and len(angles_df) > 0:
+        angle_pairs = get_atom_ids(angles_df, [['atom1_id', 'atom3_id'], ['atom1', 'atom3']])
+        for a1, a3 in angle_pairs:
+            excluded_pairs.add(tuple(sorted((a1, a3))))
+
+    # 1-4 排除（二面角两端的原子）
+    if exclude_dihedrals and dihedrals_df is not None and len(dihedrals_df) > 0:
+        dihedral_pairs = get_atom_ids(dihedrals_df, [['atom1_id', 'atom4_id'], ['atom1', 'atom4']])
+        for a1, a4 in dihedral_pairs:
+            excluded_pairs.add(tuple(sorted((a1, a4))))
+
+    return excluded_pairs
+
+
+def _process_frame_batch(
+    frame_indices: List[int],
+    cg_data: Dict,
+    beads_type1: np.ndarray,
+    beads_type2: np.ndarray,
+    ref_indices: np.ndarray,
+    target_indices: np.ndarray,
+    edges: np.ndarray
+) -> np.ndarray:
+    """
+    处理一批帧用于 RDF 计算（多进程 worker 函数）。
+
+    Args:
+        frame_indices: 帧索引列表
+        cg_data: CG 轨迹数据
+        beads_type1: type1 bead ID 数组
+        beads_type2: type2 bead ID 数组
+        ref_indices: 参考索引数组
+        target_indices: 目标索引数组
+        edges: 直方图 bin 边界
+
+    Returns:
+        这些帧的直方图累加结果
+    """
+    hist_sum = None
+
+    for frame_idx in frame_indices:
+        coords = cg_data['R'][frame_idx]
+        box = cg_data['cell'][frame_idx]
+
+        # 获取所有 bead 的坐标
+        coords_type1 = coords[beads_type1 - 1]
+        coords_type2 = coords[beads_type2 - 1]
+
+        # 使用索引提取有效 pair 的坐标
+        pos1 = coords_type1[ref_indices]
+        pos2 = coords_type2[target_indices]
+
+        # 向量化计算距离（PBC-aware）
+        delta = pos2 - pos1
+        delta -= box * np.round(delta / box)
+        distances = np.linalg.norm(delta, axis=-1)
+
+        # 累积直方图
+        hist, _ = np.histogram(distances, bins=edges)
+
+        if hist_sum is None:
+            hist_sum = np.zeros_like(hist, dtype=np.float64)
+        hist_sum += hist
+
+    return hist_sum
+
+
+def calculate_rdf(
+    cg_data: Dict,
+    bead_info: pd.DataFrame,
+    type1: int,
+    type2: int,
+    bonds_df: pd.DataFrame = None,
+    angles_df: pd.DataFrame = None,
+    dihedrals_df: pd.DataFrame = None,
+    exclude_bonds: bool = True,
+    exclude_angles: bool = True,
+    exclude_dihedrals: bool = True,
+    n_bins: int = 100,
+    custom_range: Tuple[float, float] = None,
+    n_jobs: int = 1,
+    show_progress: bool = True,
+    output_file: str = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    计算径向分布函数(RDF) - 优化版本。
+
+    使用向量化计算和多进程并行支持，性能显著提升。
+
+    Args:
+        cg_data: CG轨迹数据，格式 {'R': {frame: coords}, 'cell': {frame: box}}
+        bead_info: bead信息DataFrame，需包含 'bead_id', 'bead_type' 列
+        type1, type2: bead类型
+        bonds_df: 键拓扑DataFrame
+        angles_df: 角度拓扑DataFrame
+        dihedrals_df: 二面角拓扑DataFrame
+        exclude_bonds: 是否排除1-2键合对
+        exclude_angles: 是否排除1-3键合对
+        exclude_dihedrals: 是否排除1-4键合对
+        n_bins: 直方图bins数
+        custom_range: 距离范围 (r_min, r_max)
+        n_jobs: 并行进程数（默认1，串行）
+        show_progress: 是否显示进度条
+        output_file: 输出文件路径
+
+    Returns:
+        (r, g_r): 距离数组和RDF数组
+    """
+    # 获取指定类型的 bead ID
     beads_type1 = bead_info[bead_info['bead_type'] == type1]['bead_id'].values.astype(np.int32)
     beads_type2 = bead_info[bead_info['bead_type'] == type2]['bead_id'].values.astype(np.int32)
 
     if len(beads_type1) == 0 or len(beads_type2) == 0:
         return np.array([]), np.array([])
 
-    # 构建排除对
+    n_ref = len(beads_type1)
+    n_target = len(beads_type2)
+
+    # === 向量化构建所有 pair ===
+    # 使用 np.repeat 和 np.tile 构建所有可能的 pair 组合
+    ref_repeated = np.repeat(beads_type1, n_target)
+    target_tiled = np.tile(beads_type2, n_ref)
+    all_pairs = np.column_stack((ref_repeated, target_tiled))
+
+    # 排序 pair 以便比较（确保小的 ID 在前）
+    all_pairs.sort(axis=1)
+
+    # 获取索引（用于后续坐标提取）
+    ref_indices = np.repeat(np.arange(n_ref), n_target)
+    target_indices = np.tile(np.arange(n_target), n_ref)
+
+    # === 过滤无效 pair ===
+    # 1. 排除自身配对 (i == j)
+    mask_self = all_pairs[:, 0] != all_pairs[:, 1]
+
+    filtered_ref_i = ref_indices[mask_self]
+    filtered_target_j = target_indices[mask_self]
+    filtered_pairs = all_pairs[mask_self]
+
+    # 2. 排除键合对 (1-2, 1-3, 1-4)
     excluded_pairs = build_exclusion_pairs(
-        bonds_df or pd.DataFrame(),
-        angles_df or pd.DataFrame(),
-        dihedrals_df or pd.DataFrame(),
+        bonds_df if bonds_df is not None else pd.DataFrame(),
+        angles_df if angles_df is not None else pd.DataFrame(),
+        dihedrals_df if dihedrals_df is not None else pd.DataFrame(),
         exclude_bonds, exclude_angles, exclude_dihedrals
     )
 
-    # 确定r_max
-    first_frame = list(cg_data['cell'].keys())[0]
-    box_lengths = cg_data['cell'][first_frame]
-    r_max = np.min(box_lengths) / 2.0 if custom_range is None else custom_range[1]
+    if excluded_pairs:
+        # 使用结构化数组视图进行高效过滤
+        filtered_pairs_cont = np.ascontiguousarray(filtered_pairs)
+        excluded_arr = np.array(sorted(list(excluded_pairs)), dtype=np.int32)
+        excluded_cont = np.ascontiguousarray(excluded_arr)
 
-    # 设置bins
-    if custom_range is not None:
-        edges = np.linspace(custom_range[0], custom_range[1], n_bins + 1)
+        # 创建结构化视图用于高效比较
+        dtype_str = f'V{filtered_pairs_cont.dtype.itemsize * filtered_pairs_cont.shape[1]}'
+        filtered_view = filtered_pairs_cont.view(dtype_str).flatten()
+        excluded_view = excluded_cont.view(dtype_str).flatten()
+
+        mask_excluded = ~np.isin(filtered_view, excluded_view)
+
+        final_ref_i = filtered_ref_i[mask_excluded]
+        final_target_j = filtered_target_j[mask_excluded]
     else:
-        edges = np.arange(0.0, r_max + dr, dr)
+        final_ref_i = filtered_ref_i
+        final_target_j = filtered_target_j
 
-    # 构建所有对
-    n1, n2 = len(beads_type1), len(beads_type2)
-    all_pairs = []
-    for i in beads_type1:
-        for j in beads_type2:
-            if i != j:
-                all_pairs.append((min(i, j), max(i, j)))
-
-    # 过滤排除对
-    excluded_set = set(map(tuple, excluded_pairs))
-    valid_pairs = [p for p in all_pairs if p not in excluded_set]
-
-    if not valid_pairs:
+    if len(final_ref_i) == 0:
         return np.array([]), np.array([])
 
-    # 累积RDF
-    rdf_sum = np.zeros(len(edges) - 1)
-    num_frames = 0
+    # === 设置 bins ===
+    first_frame = list(cg_data['cell'].keys())[0]
+    box_lengths = cg_data['cell'][first_frame]
 
-    for frame_idx in sorted(cg_data['R'].keys()):
-        coords = cg_data['R'][frame_idx]
-        box = cg_data['cell'][frame_idx]
+    r_max = np.min(box_lengths) / 2.0 if custom_range is None else custom_range[1]
+    r_min = 0.0 if custom_range is None else custom_range[0]
 
-        distances = []
-        for p in valid_pairs:
-            idx1, idx2 = p[0] - 1, p[1] - 1
-            delta = coords[idx2] - coords[idx1]
+    edges = np.linspace(r_min, r_max, n_bins + 1)
+
+    # === 计算 RDF ===
+    frame_keys = sorted(cg_data['R'].keys())
+    num_frames = len(frame_keys)
+
+    # 构建进度条描述
+    pair_desc = f"RDF {type1}-{type2}"
+
+    # 判断是否使用并行
+    use_parallel = n_jobs > 1 and HAS_MULTIPROCESSING and num_frames >= n_jobs
+
+    if use_parallel:
+        # 并行处理
+        batch_size = max(1, num_frames // n_jobs)
+        frame_batches = [frame_keys[i:i + batch_size] for i in range(0, num_frames, batch_size)]
+
+        process_func = partial(
+            _process_frame_batch,
+            cg_data=cg_data,
+            beads_type1=beads_type1,
+            beads_type2=beads_type2,
+            ref_indices=final_ref_i,
+            target_indices=final_target_j,
+            edges=edges
+        )
+
+        with Pool(processes=n_jobs) as pool:
+            if show_progress and HAS_TQDM:
+                results = list(tqdm(
+                    pool.imap(process_func, frame_batches),
+                    total=len(frame_batches),
+                    desc=pair_desc,
+                    unit="batch"
+                ))
+            else:
+                results = pool.map(process_func, frame_batches)
+
+        hist_sum = np.sum(results, axis=0)
+    else:
+        # 串行处理
+        hist_sum = None
+        frame_iter = tqdm(frame_keys, desc=pair_desc, unit="frame") if show_progress and HAS_TQDM else frame_keys
+
+        for frame_idx in frame_iter:
+            coords = cg_data['R'][frame_idx]
+            box = cg_data['cell'][frame_idx]
+
+            # 获取坐标
+            coords_type1 = coords[beads_type1 - 1]
+            coords_type2 = coords[beads_type2 - 1]
+
+            pos1 = coords_type1[final_ref_i]
+            pos2 = coords_type2[final_target_j]
+
+            # 向量化计算距离
+            delta = pos2 - pos1
             delta -= box * np.round(delta / box)
-            distances.append(np.linalg.norm(delta))
+            distances = np.linalg.norm(delta, axis=-1)
 
-        hist, _ = np.histogram(distances, bins=edges)
-        rdf_sum += hist
-        num_frames += 1
+            hist, _ = np.histogram(distances, bins=edges)
 
-    # 计算g(r)
+            if hist_sum is None:
+                hist_sum = np.zeros_like(hist, dtype=np.float64)
+            hist_sum += hist
+
+    # === 归一化 ===
     r = (edges[:-1] + edges[1:]) / 2
-    dr_actual = edges[1] - edges[0]
+    dr = edges[1] - edges[0]
 
-    # 归一化
+    # 计算理想气体分布
     avg_volume = np.mean([np.prod(cg_data['cell'][i]) for i in cg_data['cell'].keys()])
-    total_pairs = len(beads_type1) * len(beads_type2) if type1 != type2 else len(beads_type1) * (len(beads_type1) - 1)
-    pair_density = total_pairs / avg_volume
 
-    shell_volume = 4 * np.pi * r**2 * dr_actual
+    if type1 == type2:
+        total_pairs = n_ref * (n_ref - 1)
+    else:
+        total_pairs = n_ref * n_target
+
+    pair_density = total_pairs / avg_volume
+    shell_volume = 4 * np.pi * r**2 * dr
     ideal_pairs = shell_volume * pair_density
 
-    g_r = np.zeros_like(r)
-    mask = ideal_pairs > 1e-9
-    g_r[mask] = (rdf_sum[mask] / num_frames) / ideal_pairs[mask]
+    # 计算 g(r)
+    g_r = np.zeros_like(hist_sum, dtype=np.float64)
+    valid_mask = ideal_pairs > 1e-9
+    g_r[valid_mask] = (hist_sum[valid_mask] / num_frames) / ideal_pairs[valid_mask]
 
     if output_file:
         np.savetxt(output_file, np.column_stack([r, g_r]),
@@ -457,9 +647,152 @@ def calculate_rdf(cg_data: Dict, bead_info: pd.DataFrame,
     return r, g_r
 
 
+def calculate_all_distributions(
+    cg_data: Dict,
+    topology: Dict,
+    bead_info: pd.DataFrame,
+    n_bins: int = 100,
+    bond_range: Tuple[float, float] = (2.0, 6.0),
+    angle_range: Tuple[float, float] = (0, 180),
+    dihedral_range: Tuple[float, float] = (-180, 180),
+    pair_range: Tuple[float, float] = (3.0, 15.0),
+    calc_pairs: bool = False,
+    exclude_12: bool = True,
+    exclude_13: bool = True,
+    exclude_14: bool = True,
+    n_jobs: int = 1,
+    show_progress: bool = True
+) -> Dict[str, Dict]:
+    """
+    计算所有类型的分布（bond, angle, dihedral, pair）。
+
+    Args:
+        cg_data: CG轨迹数据
+        topology: 拓扑信息字典 {'bonds': df, 'angles': df, 'dihedrals': df}
+        bead_info: bead信息DataFrame
+        n_bins: 直方图bins数
+        bond_range: 键距离范围 (Å)
+        angle_range: 角度范围 (deg)
+        dihedral_range: 二面角范围 (deg)
+        pair_range: Pair距离范围 (Å)
+        calc_pairs: 是否计算非键合 pair 分布
+        exclude_12/13/14: 排除1-2/1-3/1-4键合对
+        n_jobs: 并行进程数
+        show_progress: 是否显示进度
+
+    Returns:
+        {
+            'bond': {type_id: (r, hist)},
+            'angle': {type_id: (theta, hist)},
+            'dihedral': {type_id: (phi, hist)},
+            'pair': {(type1, type2): (r, g_r)}  # 仅当 calc_pairs=True
+        }
+    """
+    results = {
+        'bond': {},
+        'angle': {},
+        'dihedral': {},
+        'pair': {}
+    }
+
+    bonds_df = topology.get('bonds', pd.DataFrame())
+    angles_df = topology.get('angles', pd.DataFrame())
+    dihedrals_df = topology.get('dihedrals', pd.DataFrame())
+
+    # 计算键分布
+    if bonds_df is not None and len(bonds_df) > 0:
+        # 自动检测列名
+        atom_cols = None
+        for col_set in [['atom1_id', 'atom2_id'], ['atom1', 'atom2']]:
+            if all(c in bonds_df.columns for c in col_set):
+                atom_cols = col_set
+                break
+
+        if atom_cols:
+            for bond_type in sorted(bonds_df['bond_type'].unique()):
+                bonds_of_type = bonds_df[bonds_df['bond_type'] == bond_type]
+                bond_pairs = bonds_of_type[atom_cols].values.T
+
+                r, hist = calculate_bond_distribution(
+                    cg_data, bond_pairs,
+                    n_bins=n_bins,
+                    custom_range=bond_range
+                )
+                results['bond'][bond_type] = (r, hist)
+
+    # 计算角度分布
+    if angles_df is not None and len(angles_df) > 0:
+        atom_cols = None
+        for col_set in [['atom1_id', 'atom2_id', 'atom3_id'], ['atom1', 'atom2', 'atom3']]:
+            if all(c in angles_df.columns for c in col_set):
+                atom_cols = col_set
+                break
+
+        if atom_cols:
+            for angle_type in sorted(angles_df['angle_type'].unique()):
+                angles_of_type = angles_df[angles_df['angle_type'] == angle_type]
+                angle_triplets = angles_of_type[atom_cols].values.T
+
+                theta, hist = calculate_angle_distribution(
+                    cg_data, angle_triplets,
+                    n_bins=n_bins,
+                    custom_range=angle_range
+                )
+                results['angle'][angle_type] = (theta, hist)
+
+    # 计算二面角分布
+    if dihedrals_df is not None and len(dihedrals_df) > 0:
+        atom_cols = None
+        for col_set in [['atom1_id', 'atom2_id', 'atom3_id', 'atom4_id'], ['atom1', 'atom2', 'atom3', 'atom4']]:
+            if all(c in dihedrals_df.columns for c in col_set):
+                atom_cols = col_set
+                break
+
+        if atom_cols:
+            for dihedral_type in sorted(dihedrals_df['dihedral_type'].unique()):
+                dihedrals_of_type = dihedrals_df[dihedrals_df['dihedral_type'] == dihedral_type]
+                dihedral_quads = dihedrals_of_type[atom_cols].values.T
+
+                phi, hist = calculate_dihedral_distribution(
+                    cg_data, dihedral_quads,
+                    n_bins=n_bins,
+                    custom_range=dihedral_range
+                )
+                results['dihedral'][dihedral_type] = (phi, hist)
+
+    # 计算 pair 分布 (RDF)
+    if calc_pairs and bead_info is not None and len(bead_info) > 0:
+        unique_types = sorted(bead_info['bead_type'].unique())
+
+        for i, t1 in enumerate(unique_types):
+            for t2 in unique_types[i:]:
+                r, g_r = calculate_rdf(
+                    cg_data, bead_info, t1, t2,
+                    bonds_df=bonds_df,
+                    angles_df=angles_df,
+                    dihedrals_df=dihedrals_df,
+                    exclude_bonds=exclude_12,
+                    exclude_angles=exclude_13,
+                    exclude_dihedrals=exclude_14,
+                    n_bins=n_bins,
+                    custom_range=pair_range,
+                    n_jobs=n_jobs,
+                    show_progress=show_progress
+                )
+
+                if len(r) > 0:
+                    results['pair'][(t1, t2)] = (r, g_r)
+
+    return results
+
+
 if __name__ == "__main__":
     print("分布计算模块")
     print("使用方法:")
     print("  from LmpPy.tools.ibm_potential import distribution")
     print("  cg_data = distribution.load_cg_trajectory('traj.pkl')")
     print("  r, hist = distribution.calculate_bond_distribution(cg_data, bond_pairs)")
+    print("")
+    print("新增功能:")
+    print("  results = distribution.calculate_all_distributions(cg_data, topology, bead_info)")
+    print("  r, g_r = distribution.calculate_rdf(cg_data, bead_info, type1, type2, n_jobs=4)")

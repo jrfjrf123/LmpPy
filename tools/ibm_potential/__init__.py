@@ -49,7 +49,14 @@ from .distribution import (
     calculate_angle_distribution,
     calculate_dihedral_distribution,
     calculate_rdf,
+    calculate_all_distributions,
     build_exclusion_pairs
+)
+
+# 分布配置
+from .dist_config import (
+    DistributionConfig,
+    DEFAULT_CONFIG
 )
 
 # 玻尔兹曼反演
@@ -71,11 +78,23 @@ from .lammps_table import (
     create_reference_file
 )
 
+# 可选：绘图模块
+try:
+    from .dist_plot import (
+        plot_single_distribution,
+        plot_all_distributions,
+        plot_distribution_results
+    )
+except ImportError:
+    pass
+
 __all__ = [
     # 配置
     'IBMConfig',
     'IBMConfigLoader',
     'load_ibm_config',
+    'DistributionConfig',
+    'DEFAULT_CONFIG',
 
     # 分布
     'load_cg_trajectory',
@@ -85,6 +104,7 @@ __all__ = [
     'calculate_angle_distribution',
     'calculate_dihedral_distribution',
     'calculate_rdf',
+    'calculate_all_distributions',
     'build_exclusion_pairs',
 
     # 玻尔兹曼反演
@@ -100,5 +120,10 @@ __all__ = [
     # LAMMPS表
     'read_potential_file',
     'create_lammps_table_files',
-    'create_reference_file'
+    'create_reference_file',
+
+    # 绘图（可选）
+    'plot_single_distribution',
+    'plot_all_distributions',
+    'plot_distribution_results',
 ]
