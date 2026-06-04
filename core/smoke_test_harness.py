@@ -21,7 +21,7 @@ from typing import Optional
 try:
     from LmpPy.core.smoke_validator import SmokeValidator, SmokeTestReport
 except ImportError:
-    from smoke_validator import SmokeValidator, SmokeTestReport
+    from core.smoke_validator import SmokeValidator, SmokeTestReport
 
 
 class SmokeTestHarness:

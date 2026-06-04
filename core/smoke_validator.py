@@ -22,16 +22,16 @@ from pathlib import Path
 import numpy as np
 import sys
 
-# 同时支持从项目根导入 (LmpPy.xxx) 和从 worktree 直接导入 (xxx)
+# 同时支持从项目根导入 (LmpPy.xxx) 和从 worktree 直接导入 (core.xxx)
 try:
     from LmpPy.core.cg_reaction_identifier import load_reaction_signatures, identify_reaction
     from LmpPy.core.cg_converter import validate_cg_mapping_consistency
     from LmpPy.core.cg_bond_mapper import atom_bonds_to_cg_bonds
 except ImportError:
-    # worktree 环境: 使用相对导入
-    from cg_reaction_identifier import load_reaction_signatures, identify_reaction
-    from cg_converter import validate_cg_mapping_consistency
-    from cg_bond_mapper import atom_bonds_to_cg_bonds
+    # worktree 环境: 使用完整包路径
+    from core.cg_reaction_identifier import load_reaction_signatures, identify_reaction
+    from core.cg_converter import validate_cg_mapping_consistency
+    from core.cg_bond_mapper import atom_bonds_to_cg_bonds
 
 
 @dataclass
