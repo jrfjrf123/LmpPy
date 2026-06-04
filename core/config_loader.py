@@ -128,6 +128,9 @@ class LAMMPSParams:
     # 分子模板配置 (模板名 -> 文件路径)
     molecules: Dict[str, str] = field(default_factory=dict)
 
+    # 原子类型质量配置 (原子类型 -> 质量)
+    mass_list: Dict[int, float] = field(default_factory=dict)
+
     # 文件配置
     data_file: str = "system.data"  # LAMMPS数据文件
     input_script: str = ""  # 可选，若设置则使用外部输入脚本
@@ -145,6 +148,9 @@ class LAMMPSParams:
 
     # read_data 额外参数
     read_data_extra: ReadDataExtra = field(default_factory=ReadDataExtra)
+
+    # pair style (用于 SOAP 计算时获取 neighbor list)
+    pair_style: str = "lj/cut"  # 默认值，可在 lammps_params.yaml 中覆盖
 
 
 @dataclass
@@ -169,6 +175,10 @@ class SystemConfig:
     mapping_files: List[Dict[str, Any]]
     mass_list: Dict[int, float]
     bead_type_names: Dict[str, int]  # 全局 bead 类型名称映射 (必需)
+
+    # 目录配置（相对于 config_dir 或绝对路径）
+    work_dir: str = "work"      # LAMMPS 运行目录
+    output_dir: str = "output"  # 输出文件目录
 
 
 # ============================================================================
@@ -248,12 +258,15 @@ class ConfigLoader:
         system = data['system']
         self._validate_required(system, ['mapping_files'], path)
 
-        # 获取 data_file 路径 (用于自动提取 mass_list)
-        # 先从 lammps_params.yaml 读取 files.data_file
-        data_file = self._get_data_file_from_params()
-
-        # 加载质量列表 (优先使用 mass_list.yaml，否则从 data_file 自动提取)
-        mass_list = self.load_mass_list(data_file)
+        # 加载质量列表
+        # 优先级：1. mass_list.yaml  2. 外部传入的 data_file
+        mass_list_path = self.config_dir / 'mass_list.yaml'
+        if mass_list_path.exists():
+            mass_list = self._load_mass_list_from_yaml(mass_list_path)
+        else:
+            # 不再自动从数据文件提取，返回空字典
+            # 调用者应该从 lammps_params.mass_list 获取
+            mass_list = {}
 
         # 验证mapping_files格式
         mapping_files = system['mapping_files']
@@ -283,7 +296,9 @@ class ConfigLoader:
             name=system.get('name', 'unnamed'),
             mapping_files=mapping_files,
             mass_list=mass_list,
-            bead_type_names=bead_type_names
+            bead_type_names=bead_type_names,
+            work_dir=system.get('work_dir', 'work'),
+            output_dir=system.get('output_dir', 'output')
         )
 
     def _get_data_file_from_params(self) -> Optional[str]:
@@ -300,6 +315,36 @@ class ConfigLoader:
         data = self._load_yaml(params_path)
         files = data.get('files', {})
         return files.get('data_file')
+
+    def _load_mass_list_from_yaml(self, mass_list_path: Path) -> Dict[int, float]:
+        """
+        从 YAML 文件加载质量列表
+
+        Args:
+            mass_list_path: mass_list.yaml 文件路径
+
+        Returns:
+            Dict[int, float]: 原子类型 -> 质量
+        """
+        data = self._load_yaml(mass_list_path)
+        self._validate_required(data, ['mass_list'], mass_list_path)
+
+        mass_list = {}
+        for k, v in data['mass_list'].items():
+            try:
+                atom_type = int(k)
+                mass = float(v)
+                if mass <= 0:
+                    raise ConfigInvalidValueError(
+                        f"mass_list[{k}]", mass, "质量必须为正数", mass_list_path
+                    )
+                mass_list[atom_type] = mass
+            except (ValueError, TypeError) as e:
+                raise ConfigInvalidValueError(
+                    f"mass_list[{k}]", v, str(e), mass_list_path
+                )
+
+        return mass_list
 
     def load_mass_list(self, data_file: Optional[str] = None) -> Dict[int, float]:
         """
@@ -319,25 +364,7 @@ class ConfigLoader:
 
         # 优先使用 mass_list.yaml (作为覆盖配置)
         if mass_list_path.exists():
-            data = self._load_yaml(mass_list_path)
-            self._validate_required(data, ['mass_list'], mass_list_path)
-
-            mass_list = {}
-            for k, v in data['mass_list'].items():
-                try:
-                    atom_type = int(k)
-                    mass = float(v)
-                    if mass <= 0:
-                        raise ConfigInvalidValueError(
-                            f"mass_list[{k}]", mass, "质量必须为正数", mass_list_path
-                        )
-                    mass_list[atom_type] = mass
-                except (ValueError, TypeError) as e:
-                    raise ConfigInvalidValueError(
-                        f"mass_list[{k}]", v, str(e), mass_list_path
-                    )
-
-            return mass_list
+            return self._load_mass_list_from_yaml(mass_list_path)
 
         # 从 data_file 自动提取
         if data_file:
@@ -434,6 +461,17 @@ class ConfigLoader:
         # 解析molecules配置
         molecules = data.get('molecules', {})
 
+        # 解析mass_list配置
+        mass_list_raw = data.get('mass_list', {})
+        mass_list = {}
+        for k, v in mass_list_raw.items():
+            try:
+                atom_type = int(k)
+                mass = float(v)
+                mass_list[atom_type] = mass
+            except (ValueError, TypeError):
+                pass  # 忽略无效条目
+
         return LAMMPSParams(
             loop_num=int(sim['loop_num']),
             dt=float(sim['dt']),
@@ -449,6 +487,7 @@ class ConfigLoader:
             stabilization=float(br['stabilization']),
             reactions=reactions,
             molecules=molecules,
+            mass_list=mass_list,
             data_file=files.get('data_file', 'system.data'),
             input_script=files.get('input_script', ''),
             initial_cg_mapping=files.get('initial_cg_mapping', 'AtomId_BeadId_compare_list.csv'),
@@ -460,7 +499,8 @@ class ConfigLoader:
             output_cg_bonds=files.get('output_cg_bonds', 'cg_bonds.txt'),
             output_cg_angles=files.get('output_cg_angles', 'cg_angles.txt'),
             output_cg_dihedrals=files.get('output_cg_dihedrals', 'cg_dihedrals.txt'),
-            read_data_extra=read_data_extra
+            read_data_extra=read_data_extra,
+            pair_style=sim.get('pair_style', 'lj/cut')
         )
 
     def load_mapping_config(self, mapping_path: str) -> MappingConfig:

@@ -29,7 +29,8 @@ from LmpPy.tools.aa2cg import (
     write_trajectory_to_xyz,
     read_lammps_data,
     convert_data_to_cg,
-    write_cg_data_file
+    write_cg_data_file,
+    unwrap_coords
 )
 
 
@@ -80,6 +81,15 @@ def cmd_convert_data(args):
     aa_data = read_lammps_data(args.input)
     print(f"  原子数: {len(aa_data['ids'])}")
     print(f"  键数: {len(aa_data['bonds'])}")
+
+    # 解缠分子坐标（处理PBC边界跨越）
+    print("\n解缠分子坐标...")
+    unwrapped_coords = unwrap_coords(
+        aa_data['ids'], aa_data['types'], aa_data['coords'],
+        aa_data['box'], aa_data['bonds']
+    )
+    aa_data['coords'] = unwrapped_coords
+    print(f"  ✓ 坐标已解缠")
 
     # 转换为CG
     print("\n转换为CG...")
