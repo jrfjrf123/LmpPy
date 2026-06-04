@@ -1,8 +1,8 @@
 # LmpPy - LAMMPS Bond/React 后处理框架
 
-> 版本: 2.1
+> 版本: 2.4
 > 作者: Claude
-> 日期: 2026-04-02
+> 日期: 2026-06-03
 
 ## 目录
 
@@ -11,6 +11,7 @@
 - [依赖项与安装](#依赖项与安装)
 - [快速开始](#快速开始)
 - [运行方式](#运行方式)
+- [主循环执行顺序](#主循环执行顺序)
 - [配置文件详解](#配置文件详解)
 - [CG映射配置](#cg映射配置)
 - [继续计算功能](#继续计算功能)
@@ -21,6 +22,7 @@
 - [IBM势能计算配置文件](#ibm势能计算配置文件)
 - [使用教程](#使用教程)
 - [常见问题](#常见问题)
+- [模块依赖关系](#模块依赖关系)
 - [更新日志](#更新日志)
 
 ---
@@ -62,22 +64,33 @@ LmpPy 是一个用于 LAMMPS bond/react 模拟的后处理框架，主要功能�
 
 ```
 LmpPy/
-├── core/                          # 核心模块
-│   ├── __init__.py                # 模块导出
-│   ├── config_loader.py           # 配置加载器
-│   ├── mapping_generator.py       # CG映射生成器
-│   ├── template_parser.py         # 模板解析器
-│   ├── lammps_data_extractor.py   # LAMMPS数据提取器
-│   ├── bond_detector.py           # 键变化检测器
-│   ├── reaction_locator.py        # 反应位点定位器
-│   ├── cg_mapper.py               # CG映射更新器
-│   ├── cg_converter.py            # CG坐标转换器
-│   ├── cg_bond_mapper.py          # 粗粒键映射器
-│   ├── cg_topology.py             # CG拓扑推导
-│   ├── cg_initializer.py          # CG系统初始化
-│   └── bonds_recorder.py          # 键连表输出器
-├── tools/                         # 工具模块 (新增)
-│   ├── aa2cg/                     # AA→CG转换工具
+├── __init__.py                    # 包入口，版本 0.1.0
+├── run_refactored.py              # 主入口脚本 (LAMMPSReactionRunner)
+├── test_integration.py            # 集成测试
+├── core/                          # 核心功能模块
+│   ├── __init__.py                # 导出所有核心类和函数
+│   ├── config_loader.py           # YAML配置加载器 (ConfigLoader, SystemConfig, LAMMPSParams)
+│   ├── mapping_generator.py       # CG映射生成器 (CGCompareList, MappingGenerator)
+│   ├── template_parser.py         # LAMMPS模板解析器 (TemplateParser, ReactionTemplate)
+│   ├── lammps_data_extractor.py   # LAMMPS数据提取器 (LAMMPSDataExtractor, AtomData, BondData)
+│   ├── bond_detector.py           # 键变化检测器 (BondDetector, BondChanges)
+│   ├── reaction_locator.py        # 反应位点定位器 (ReactionLocator, ReactionMatch)
+│   ├── cg_mapper.py               # CG映射更新器 (CGMapper, CGMapping)
+│   ├── cg_converter.py            # CG坐标转换器 (CGConverter)
+│   ├── cg_bond_mapper.py          # 粗粒键映射器 (CGBondMapper, CGBond)
+│   ├── cg_topology.py             # CG拓扑推导器 (CGTopology)
+│   ├── bonds_recorder.py          # 键连表记录器 (BondsRecorder, BondRecord)
+│   └── cg_initializer.py          # CG系统初始化器 (CGInitializer, CGSystem)
+├── utils/                         # 工具函数
+│   ├── __init__.py
+│   ├── coordinate_utils.py        # 坐标处理 (wrap_coordinates, pbc_distance, unwrap_coords)
+│   ├── file_utils.py              # 文件I/O (write_lammps_dump_file, read_lammps_dump_file)
+│   ├── graph_utils.py             # 图论算法 (find_molecules - Numba优化)
+│   ├── topology.py                # 拓扑文件读写 (TopologyData)
+│   └── units.py                   # 单位转换 (UnitConverter)
+├── tools/                         # 工具模块集合
+│   ├── __init__.py
+│   ├── aa2cg/                     # 全原子到粗粒化转换
 │   │   ├── data_converter.py      # LAMMPS data转换
 │   │   ├── trj_converter.py       # 轨迹转换
 │   │   └── mapping_utils.py       # 映射工具函数
@@ -89,23 +102,32 @@ LmpPy/
 │   └── smooth_utils/              # 分布平滑工具包
 │       ├── core.py                # 核心平滑算法
 │       ├── cli.py                 # 命令行入口
-│       └── ...                    # 其他平滑模块
-├── utils/                         # 工具函数
-│   ├── __init__.py
-│   ├── coordinate_utils.py        # 坐标处理
-│   ├── file_utils.py              # 文件I/O
-│   ├── graph_utils.py             # 图论算法
-│   ├── topology.py                # 拓扑文件读写 (新增)
-│   └── units.py                   # 单位转换 (新增)
-├── scripts/                       # 脚本入口 (新增)
-│   ├── generate_initial_mapping.py  # 初始CG映射生成
-│   ├── smooth_distribution.py       # 分布平滑CLI
-│   ├── convert_aa2cg.py             # AA→CG转换CLI
-│   └── calc_ibm_potential.py        # IBM势能计算CLI
+│       ├── constants.py           # 常量定义
+│       ├── io.py                  # 文件I/O
+│       ├── preprocess.py          # 预处理
+│       ├── peaks.py               # 峰检测
+│       ├── zones.py               # 区域分类
+│       ├── quality.py             # 质量评估
+│       ├── optimize.py            # 参数优化
+│       ├── angle_dihedral.py      # 角度/二面角平滑
+│       ├── report.py              # 报告生成
+│       ├── dist_config.py         # 分布配置
+│       └── dist_plot.py           # 分布绘图
+├── scripts/                       # CLI脚本
+│   ├── build_cg_system.py         # 构建CG体系LAMMPS data文件
+│   ├── convert_aa2cg.py           # AA→CG转换CLI
+│   ├── generate_initial_mapping.py # 生成初始CG映射
+│   ├── smooth_distribution.py     # 分布平滑CLI
+│   ├── calc_ibm_potential.py      # IBM势能计算CLI
+│   ├── calc_dist.py               # 分布计算CLI (VOTCA格式)
+│   ├── plot_dist.py               # 分布绘图CLI
+│   ├── yaml2csv_mapping.py        # YAML→CSV映射转换
+│   └── data2gro.py                # LAMMPS data转GRO文件
+├── config/                        # 配置文件目录
+│   ├── mapping/                   # CG映射配置模板
+│   └── reactions/                 # 反应模板配置
 ├── docs/                          # 文档和示例
 │   └── examples/                  # 示例配置文件
-├── run_refactored.py              # 主程序入口
-├── test_integration.py            # 集成测试
 └── README.md                      # 本文档
 ```
 
@@ -168,8 +190,8 @@ my_system/
 ├── rxn1_pre.lammpstemplate  # 反应前模板
 ├── rxn1_post.lammpstemplate # 反应后模板
 ├── rxn1.map                 # bond/react map文件
-└── rxn1_pre_mapping.yaml    # 反应前CG映射
-    rxn1_post_mapping.yaml   # 反应后CG映射
+├── rxn1_pre_mapping.yaml    # 反应前CG映射
+└── rxn1_post_mapping.yaml   # 反应后CG映射
 ```
 
 ### 2. 运行模拟
@@ -224,6 +246,30 @@ mpirun -np 8 python -m LmpPy.run_refactored config/
 ```bash
 # 设置OpenMP线程数 (默认为1)
 export OMP_NUM_THREADS=1
+```
+
+---
+
+## 主循环执行顺序
+
+LmpPy 模拟的主循环 (`run_refactored.py`) 每个周期按以下顺序执行：
+
+| 步骤 | 描述 | 涉及模块 |
+|------|------|----------|
+| Step 1 | **运行 bond/react** | LAMMPS `fix bond/react` |
+| Step 2 | **检测反应** | `BondDetector` → `ReactionLocator` → `CGMapper` → `CGConverter` → 写入轨迹帧 |
+| Step 3 | **弛豫** | NVE/limit + NVT 反应原子弛豫，然后 NPT 全原子 |
+| Step 4 | **更新坐标/image flags** | `LAMMPSDataExtractor` |
+
+**Step 2 详细流程**：
+
+```
+1. BondDetector: 检测键变化 (created_bonds, deleted_bonds)
+2. ReactionLocator: 反应模板匹配 (pre-before + post-after 双重验证)
+3. CGMapper: 更新 CG 映射 (基于 ReactionMatch)
+4. CGConverter: 转换 CG 坐标 (惰性索引缓存)
+5. 写入 CG 轨迹帧 (post-reaction, pre-relaxation)
+6. 缓存反应帧数据到 reaction_frames.npz
 ```
 
 ---
@@ -344,7 +390,6 @@ files:
   output_reaction_count: "reaction_num.txt"
   output_final_data: "final_frame.data"
   output_final_mapping: "final_cg_compare_list.csv"
-  output_bonds_record: "bonds_record.npz"
 
   # CG 拓扑输出
   output_cg_bonds: "cg_bonds.txt"
@@ -527,17 +572,33 @@ mpirun -np 4 python -m LmpPy.run_refactored .
 
 ## 输出文件说明
 
-### 主要输出文件
+输出文件按产生来源分为以下几类。
+
+### 1. 主模拟管线输出文件
+
+由 `run_refactored.py` 直接产生的文件。
+
+| 文件 | 格式 | 说明 | 产生条件 |
+|------|------|------|----------|
+| `{output_cg_trajectory}`<br>(默认 `cg_trajectory.lammpstrj`) | LAMMPS dump | CG 轨迹文件，可 VMD 可视化 | 每次主循环 |
+| `{output_reaction_count}`<br>(默认 `reaction_num.txt`) | 文本 | 每步反应计数统计 | 每次有反应时 |
+| `final_frame.data` | LAMMPS data | 最终帧原子数据 (LAMMPS `write_data` 输出) | 模拟结束 |
+| `final_cg_compare_list.csv` | CSV (5 列) | 最终 CG 映射关系 | 模拟结束 |
+| `reaction_frames.npz` | NPZ (7 个数组) | 反应帧详细数据，供 SOAP 计算使用 | 有反应时 |
+
+### 2. CG 拓扑文件
+
+由 `CGTopology.to_files()` 产生，文件名由 `lammps_params.yaml` 中 `output_cg_bonds` 等配置指定。
 
 | 文件 | 格式 | 说明 |
 |------|------|------|
-| `cg_trajectory.lammpstrj` | LAMMPS dump | CG轨迹文件，可VMD可视化 |
-| `reaction_num.txt` | 文本 | 每步反应计数统计 |
-| `final_frame.data` | LAMMPS data | 最终帧原子数据 |
-| `final_cg_compare_list.csv` | CSV | 最终CG映射关系 |
-| `bonds_record.npz` | NPZ | 键连表记录（含反应帧数据） |
+| `{prefix}_bonds.txt` | 空格分隔整数 (3 列) | CG 键：`[bond_type, bead1, bead2]` |
+| `{prefix}_angles.txt` | 空格分隔整数 (4 列) | CG 角度：`[angle_type, bead1, bead2, bead3]` |
+| `{prefix}_dihedrals.txt` | 空格分隔整数 (5 列) | CG 二面角：`[dihedral_type, bead1, bead2, bead3, bead4]` |
 
-### reaction_num.txt 格式
+### 3. 关键输出文件详解
+
+#### reaction_num.txt 格式
 
 ```
 # timestep rxn1 rxn2 rxn3 ...
@@ -547,7 +608,7 @@ mpirun -np 4 python -m LmpPy.run_refactored .
 ...
 ```
 
-### final_cg_compare_list.csv 格式
+#### final_cg_compare_list.csv 格式
 
 ```csv
 bead_id,mol_id,bead_type,AA_id,mass
@@ -567,19 +628,127 @@ bead_id,mol_id,bead_type,AA_id,mass
 | `AA_id` | 原子 ID |
 | `mass` | 原子质量 |
 
-### bonds_record.npz 内容
+#### reaction_frames.npz 内容
+
+这是 **SOAP 计算模块的核心输入数据源**，包含每次反应发生时的完整快照。
 
 ```python
 import numpy as np
-data = np.load('bonds_record.npz')
+data = np.load('reaction_frames.npz', allow_pickle=True)
 
-# 可用的数组
-data['aa_bonds_before']    # 反应前原子键 (object数组)
-data['aa_bonds_after']     # 反应后原子键
-data['cg_bonds_before']    # 反应前CG键
-data['cg_bonds_after']     # 反应后CG键
-data['timestep']           # 反应发生的时间步
+# 7 个数组（精简格式，v2.4+）
+data['aa_coords_before']     # (n_reactions, n_atoms, 5) 反应前 AA 坐标 (含 image_flags)
+data['aa_coords_after']      # (n_reactions, n_atoms, 5) 反应后 AA 坐标
+data['aa_bonds_before']      # (n_reactions,) object     反应前原子键
+data['aa_bonds_after']       # (n_reactions,) object     反应后原子键
+data['cg_mapping_before']    # (n_reactions, n_atoms, 5) 反应前 CG 映射
+data['cg_mapping_after']     # (n_reactions, n_atoms, 5) 反应后 CG 映射
+data['timestep']             # (n_reactions,)            反应时间步
+
+# 向后兼容：旧格式 npz 可能仍包含 aa_ids, aa_types, cg_bonds_before/after
 ```
+
+**推导规则**（v2.4+ 精简格式下）：
+- `aa_ids` → 从 `cg_mapping[:, 3]` 获取 (AA_id 列)
+- `aa_types` → 运行时不变，从初始状态获取
+- `cg_bonds_before/after` → `atom_bonds_to_cg_bonds(aa_bonds, cg_mapping)`
+
+**CG 键格式**: `[bond_type, bead1_id, bead2_id]`
+
+**使用示例**（SOAP 计算模块中）：
+```python
+# 反应对 = cg_bonds_after - cg_bonds_before（集合差）
+# cg_bonds 可由 aa_bonds + cg_mapping 推导（后处理自动完成）
+# 这是 SOAP_calc_and_Feature_select 模块识别正样本的依据
+```
+
+#### bonds_record_*.npz 内容（历史兼容）
+
+```python
+import numpy as np
+data = np.load('bonds_records/bonds_record_100_0.npz', allow_pickle=True)
+
+data['timestep']        # int, 反应时间步
+data['run_step']        # int, 循环中的步数
+data['bonds_before']    # (n_bonds, 3) [bond_type, atom1, atom2]
+data['bonds_after']     # (n_bonds, 3)
+data['reaction_type']   # str, 反应类型名称 (如 "rxn1")
+```
+
+#### cg_topology_record_*.npz 内容
+
+```python
+import numpy as np
+data = np.load('bonds_records/cg_topology_record_100_0.npz', allow_pickle=True)
+
+data['timestep']                # int
+data['run_step']                # int
+data['cg_bonds_before']         # (n_bonds, 3) [bond_type, bead1, bead2]
+data['cg_bonds_after']          # (n_bonds, 3)
+data['cg_angles_before']        # (n_angles, 4) [angle_type, bead1, bead2, bead3]
+data['cg_angles_after']         # (n_angles, 4)
+data['cg_dihedrals_before']     # (n_dihedrals, 5) [dihedral_type, bead1, bead2, bead3, bead4]
+data['cg_dihedrals_after']      # (n_dihedrals, 5)
+data['reaction_type']           # str
+```
+
+### 5. 工具模块输出文件
+
+#### AA2CG 工具 (`tools/aa2cg/`, `scripts/convert_aa2cg.py`)
+
+| 文件 | 格式 | 说明 |
+|------|------|------|
+| `{output}.pkl` | Pickle | CG 轨迹 (帧列表) |
+| `{output}.xyz` | XYZ | CG 轨迹 (XYZ 格式) |
+| `{output}.data` | LAMMPS data | CG 体系 LAMMPS 数据文件 |
+| `{prefix}_bonds.txt` | 文本 | CG 键拓扑 |
+| `{prefix}_angles.txt` | 文本 | CG 角度拓扑 |
+| `{prefix}_dihedrals.txt` | 文本 | CG 二面角拓扑 |
+
+#### IBM 势能工具 (`tools/ibm_potential/`, `scripts/calc_ibm_potential.py`)
+
+| 文件 | 格式 | 说明 |
+|------|------|------|
+| `{distributions_dir}/bond_type{N}_dist.txt` | 2 列文本 | 键长分布 P(r) |
+| `{distributions_dir}/angle_type{N}_dist.txt` | 2 列文本 | 角度分布 P(θ) |
+| `{distributions_dir}/dihedral_type{N}_dist.txt` | 2 列文本 | 二面角分布 P(φ) |
+| `{distributions_dir}/rdf_type{A}_{B}.txt` | 2 列文本 | 径向分布函数 g(r) |
+| `{potentials_dir}/bond_type{N}_potential.txt` | 2 列文本 | 键长势函数 U(r) |
+| `{potentials_dir}/angle_type{N}_potential.txt` | 2 列文本 | 角度势函数 U(θ) |
+| `{potentials_dir}/dihedral_type{N}_potential.txt` | 2 列文本 | 二面角势函数 U(φ) |
+| `{potentials_dir}/pair_type{A}_{B}_potential.txt` | 2 列文本 | 对势函数 U(r) |
+| `{table_dir}/pair_table.txt` | LAMMPS table | LAMMPS 对势表文件 |
+| `{table_dir}/bond_table.txt` | LAMMPS table | LAMMPS 键势表文件 |
+| `{table_dir}/angle_table.txt` | LAMMPS table | LAMMPS 角度表文件 |
+| `{table_dir}/dihedral_table.txt` | LAMMPS table | LAMMPS 二面角表文件 |
+| `{table_dir}/table_reference.txt` | 文本 | 势表类型参考 |
+
+#### 分布平滑工具 (`tools/smooth_utils/`, `scripts/smooth_distribution.py`)
+
+| 文件 | 格式 | 说明 |
+|------|------|------|
+| `{output_dir}/{basename}_dist.txt` | 2 列文本 | 平滑后的分布 |
+| `{output_dir}/{basename}_comparison.png` | PNG | 原始/平滑/力曲线三面对比图 |
+| `{output_dir}/{basename}_report.txt` | 文本 | 平滑质量评估报告 |
+
+#### 分布计算/绘图脚本 (`scripts/calc_dist.py`, `scripts/plot_dist.py`)
+
+| 文件 | 格式 | 说明 |
+|------|------|------|
+| `{output_dir}/bond_type{N}.dist.tgt` | VOTCA 格式 | VOTCA 目标分布文件 |
+| `{output_dir}/angle_type{N}.dist.tgt` | VOTCA 格式 | VOTCA 角度目标文件 |
+| `{output_dir}/dihedral_type{N}.dist.tgt` | VOTCA 格式 | VOTCA 二面角目标文件 |
+| `{output_dir}/pair_type{A}_{B}.dist.tgt` | VOTCA 格式 | VOTCA 对目标文件 |
+| `{output}/*.png` | PNG | 分布汇总图 |
+
+#### 其他脚本输出
+
+| 脚本 | 输出文件 | 说明 |
+|------|----------|------|
+| `yaml2csv_mapping.py` | `{output_csv}` (默认 `AtomId_BeadId_compare_list.csv`) | YAML 映射转 CSV |
+| `generate_initial_mapping.py` | 配置文件指定的 `initial_cg_mapping` | 初始 CG 映射 |
+| `build_cg_system.py` | `{output}.data` | CG 体系 LAMMPS data 文件 |
+| `data2gro.py` | `{output}.gro` | LAMMPS data 转 GRO 文件 |
 
 ---
 
@@ -603,7 +772,11 @@ from LmpPy.core import (
     CGMapper, CGMapping,
     CGConverter, lammpstrj2cg,
     CGBondMapper, atom_bonds_to_cg_bonds,
-    BondsRecorder, save_bonds_record,
+    BondsRecorder, save_bonds_record,  # 向后兼容：新模拟不再生成 bonds_records
+    # CG系统初始化
+    CGInitializer, CGSystem, initialize_cg_system,
+    # CG拓扑
+    CGTopology, derive_cg_topology_from_bonds,
 )
 ```
 
@@ -667,11 +840,41 @@ detector = BondDetector(n_atoms=10000)
 changes = detector.detect(bonds_before, bonds_after)
 
 if changes.has_changes:
-    print(f"新增键: {len(changes.bonds_formed)}")
-    print(f"断裂键: {len(changes.bonds_broken)}")
+    print(f"新增键: {len(changes.created_bonds)}")
+    print(f"断裂键: {len(changes.deleted_bonds)}")
 
 # 或使用便捷函数
-bonds_formed, bonds_broken = compare_two_bonds(bonds_before, bonds_after)
+# 注意: 返回顺序为 (仅在bonds1中的键, 仅在bonds2中的键)
+deleted_bonds, created_bonds = compare_two_bonds(bonds_before, bonds_after)
+```
+
+### ReactionLocator - 反应位点定位
+
+```python
+from LmpPy.core import ReactionLocator, locate_reactions
+
+locator = ReactionLocator(
+    templates=reaction_templates,  # List[ReactionTemplate]
+    n_atoms=n_atoms
+)
+
+# 定位反应
+matches = locator.locate(
+    bonds_before=bonds_before,
+    bonds_after=bonds_after,
+    atom_ids=atom_ids,
+    atom_types=atom_types
+)
+
+# 或使用便捷函数
+matches = locate_reactions(
+    templates=reaction_templates,
+    bonds_before=bonds_before,
+    bonds_after=bonds_after,
+    atom_ids=atom_ids,
+    atom_types=atom_types,
+    n_atoms=n_atoms
+)
 ```
 
 ### CGConverter - CG坐标转换
@@ -701,9 +904,49 @@ converter.invalidate_cache()
 from LmpPy.core import atom_bonds_to_cg_bonds
 
 # 将原子键转换为CG键
+# 注意: cg_mapping_data 是从 CGCompareList 提取的 [bead_id, bead_type] 二维数组
+# 不是完整的 5 列 compare_list
+cg_mapping_data = cg_list.get_mapping_array()  # (n_atoms, 2) [bead_id, bead_type]
 cg_bonds = atom_bonds_to_cg_bonds(
     atom_bonds,        # 原子键列表 [(atom1, atom2), ...]
-    cg_compare_list    # CG映射
+    cg_mapping_data    # (n_atoms, 2) 数组
+)
+```
+
+### CGInitializer - CG系统初始化
+
+```python
+from LmpPy.core import CGInitializer, initialize_cg_system
+
+# 从完整体系配置一次性初始化CG系统
+cg_system = initialize_cg_system(
+    system_config,       # SystemConfig
+    lammps_data_file,    # .data 文件路径
+    mass_list            # 质量列表
+)
+
+print(f"Bead数: {cg_system.n_beads}")
+print(f"CG键数: {len(cg_system.bonds)}")
+```
+
+### CGTopology - CG拓扑推导
+
+```python
+from LmpPy.core import CGTopology, derive_cg_topology_from_bonds
+
+# 从 CG 键推导完整拓扑
+cg_topology = derive_cg_topology_from_bonds(cg_bonds)
+
+# 拓扑属性
+print(f"键数: {len(cg_topology.bonds)}")
+print(f"角数: {len(cg_topology.angles)}")
+print(f"二面角数: {len(cg_topology.dihedrals)}")
+
+# 写入文件
+cg_topology.to_files(
+    bonds_file="cg_bonds.txt",
+    angles_file="cg_angles.txt",
+    dihedrals_file="cg_dihedrals.txt"
 )
 ```
 
@@ -746,6 +989,9 @@ from LmpPy.utils import (
     read_topology_files,
     convert_energy,
     UnitConverter,
+    find_molecules,
+    wrap_coordinates,
+    pbc_distance,
 )
 ```
 
@@ -815,7 +1061,7 @@ smoothed_path, result = smooth_distribution(
 ### 工具函数
 
 ```python
-from LmpPy.utils import read_topology_files, UnitConverter
+from LmpPy.utils import read_topology_files, UnitConverter, find_molecules
 
 # 读取拓扑文件
 topo = read_topology_files("cg_bonds.txt", "cg_angles.txt", "cg_dihedrals.txt")
@@ -824,6 +1070,9 @@ topo = read_topology_files("cg_bonds.txt", "cg_angles.txt", "cg_dihedrals.txt")
 converter = UnitConverter()
 kt = converter.kt(400)  # kT at 400 K
 energy_kJ = converter.convert_energy(1.0, 'kcal/mol', 'kJ/mol')
+
+# BFS分子查找 (Numba优化)
+molecule_ids = find_molecules(bonds, natoms)
 ```
 
 ---
@@ -927,9 +1176,16 @@ print(f"总反应次数: {reaction_df['rxn1'].sum()}")
 cg_mapping = pd.read_csv('final_cg_compare_list.csv')
 print(f"Bead数量: {cg_mapping['bead_id'].nunique()}")
 
-# 读取键记录
-bonds_data = np.load('bonds_record.npz', allow_pickle=True)
-print(f"记录的反应次数: {len(bonds_data['timestep'])}")
+# 读取反应帧数据
+reaction_frames = np.load('reaction_frames.npz', allow_pickle=True)
+print(f"记录的反应次数: {len(reaction_frames['timestep'])}")
+
+# 从 aa_bonds 推导 CG 键（v2.4+ 精简格式）
+from LmpPy.core import atom_bonds_to_cg_bonds
+aa_bonds = reaction_frames['aa_bonds_after'][0]
+cg_mapping = reaction_frames['cg_mapping_after'][0]
+cg_bonds = atom_bonds_to_cg_bonds(aa_bonds, cg_mapping)
+print(f"CG键数: {len(cg_bonds)}")
 ```
 
 ---
@@ -989,27 +1245,37 @@ sed -i 's/\t/  /g' *.yaml
 
 ```bash
 # 处理单个分布文件
-python -m LmpPy.scripts.smooth_distribution bond_type1_dist.txt -o smoothed_output/
+python LmpPy/scripts/smooth_distribution.py bond_type1_dist.txt -o smoothed_output/
 
 # 处理目录下所有分布文件
-python -m LmpPy.scripts.smooth_distribution -d distributions/ -o smoothed_output/
+python LmpPy/scripts/smooth_distribution.py -d distributions/ -o smoothed_output/
 
 # 指定温度
-python -m LmpPy.scripts.smooth_distribution bond_type1_dist.txt -T 300 -o smoothed_output/
+python LmpPy/scripts/smooth_distribution.py bond_type1_dist.txt -T 300 -o smoothed_output/
+```
+
+### 分布计算工具
+
+```bash
+# 计算分布
+python LmpPy/scripts/calc_dist.py -c ibm_potential.yaml
+
+# 绘制分布图
+python LmpPy/scripts/plot_dist.py dist_file.txt -o output.png
 ```
 
 ### AA→CG转换工具
 
 ```bash
 # 轨迹转换 (GROMACS TRR)
-python -m LmpPy.scripts.convert_aa2cg trj \
+python LmpPy/scripts/convert_aa2cg.py trj \
     --tpr topol.tpr \
     --trr traj.trr \
     --mapping mapping.csv \
     -o cg_trajectory.pkl
 
 # Data文件转换
-python -m LmpPy.scripts.convert_aa2cg data \
+python LmpPy/scripts/convert_aa2cg.py data \
     --input system.data \
     --mapping mapping.csv \
     --bonds cg_bonds.txt \
@@ -1020,13 +1286,37 @@ python -m LmpPy.scripts.convert_aa2cg data \
 
 ```bash
 # 使用配置文件
-python -m LmpPy.scripts.calc_ibm_potential -c ibm_potential.yaml
+python LmpPy/scripts/calc_ibm_potential.py -c ibm_potential.yaml
 
 # 使用默认配置（在配置目录下运行）
-python -m LmpPy.scripts.calc_ibm_potential
+python LmpPy/scripts/calc_ibm_potential.py
 
 # 安静模式
-python -m LmpPy.scripts.calc_ibm_potential -c ibm_potential.yaml -q
+python LmpPy/scripts/calc_ibm_potential.py -c ibm_potential.yaml -q
+```
+
+### 映射转换工具
+
+```bash
+# YAML映射转CSV格式
+python LmpPy/scripts/yaml2csv_mapping.py mapping.yaml -o mapping.csv
+```
+
+### 构建CG体系
+
+```bash
+# 根据单分子拓扑和分子数量构建完整多分子体系
+python LmpPy/scripts/build_cg_system.py \
+    --topology monomer_topo.txt \
+    --copies 100 \
+    --output system.data
+```
+
+### LAMMPS data转GRO
+
+```bash
+# LAMMPS data文件转GROMACS GRO格式
+python LmpPy/scripts/data2gro.py input.data -o output.gro
 ```
 
 ---
@@ -1096,6 +1386,97 @@ output:
 
 ---
 
+## 模块依赖关系
+
+### 模块调用图
+
+```
+run_refactored.py
+    ├── core/config_loader.py
+    │   └── ConfigLoader → SystemConfig, LAMMPSParams, ReactionInfo
+    ├── core/mapping_generator.py
+    │   └── MappingGenerator → CGCompareList
+    ├── core/template_parser.py
+    │   └── TemplateParser → ReactionTemplate
+    ├── core/lammps_data_extractor.py
+    │   └── LAMMPSDataExtractor → AtomData, BondData
+    │   └── decode_image_flags_vectorized() (362x 加速)
+    ├── core/bond_detector.py
+    │   └── BondDetector → BondChanges
+    │   └── compare_two_bonds()
+    ├── core/reaction_locator.py
+    │   ├── ReactionLocator → ReactionMatch
+    │   └── depends on: bond_detector, template_parser
+    ├── core/cg_mapper.py
+    │   ├── CGMapper → CGMapping
+    │   └── depends on: reaction_locator, template_parser
+    ├── core/cg_converter.py
+    │   ├── CGConverter (惰性索引缓存)
+    │   └── depends on: cg_mapper
+    ├── core/cg_bond_mapper.py
+    │   ├── CGBondMapper → CGBond
+    │   └ atom_bonds_to_cg_bonds()
+    ├── core/cg_topology.py
+    │   ├── CGTopology
+    │   └── derive_cg_topology_from_bonds()
+    ├── core/bonds_recorder.py
+    │   ├── BondsRecorder → BondRecord, CGTopologyRecord (向后兼容)
+    ├── core/cg_initializer.py
+    │   ├── CGInitializer → CGSystem
+    │   └── depends on: config_loader, mapping_generator, lammps_data_extractor,
+    │                    cg_bond_mapper, cg_mapper, cg_topology
+    ├── utils/graph_utils.py
+    │   └── find_molecules() (Numba 30-80x 加速)
+    ├── utils/coordinate_utils.py
+    │   ├── wrap_coordinates()
+    │   ├── pbc_distance()
+    │   └── unwrap_coords_python()
+    └── utils/file_utils.py
+        ├── write_lammps_dump_file()
+        └── write_cg_trajectory()
+```
+
+### 数据流
+
+```
+1. 配置加载
+   ConfigLoader.load_system_config() → SystemConfig
+   ConfigLoader.load_lammps_params() → LAMMPSParams
+
+2. 初始化
+   MappingGenerator.generate() → CGCompareList (初始CG映射)
+   TemplateParser.load_all_reaction_templates() → List[ReactionTemplate]
+   CGInitializer.initialize() → CGSystem (初始CG拓扑)
+
+3. 主循环
+   ┌─────────────────────────────────────────────────────────────┐
+   │ Step 1: bond/react                                          │
+   │   LAMMPS fix bond/react                                      │
+   │                                                              │
+   │ Step 2: 检测反应                                             │
+   │   LAMMPSDataExtractor.extract_all() → AtomData, BondData    │
+   │   BondDetector.detect() → BondChanges                       │
+   │   ReactionLocator.locate() → List[ReactionMatch]            │
+   │   CGMapper.batch_update() → CGMapping (更新)                 │
+   │   CGConverter.convert() → CG坐标                             │
+   │   缓存反应帧 → reaction_frames.npz (v2.4+)                   │
+   │                                                              │
+   │ Step 3: 弛豫                                                 │
+   │   NVE/limit + NVT (反应原子)                                  │
+   │   NPT (全原子)                                               │
+   │                                                              │
+   │ Step 4: 更新                                                 │
+   │   LAMMPSDataExtractor.invalidate_cache()                    │
+   └─────────────────────────────────────────────────────────────┘
+
+4. 输出
+   write_cg_trajectory() → cg_trajectory.lammpstrj
+   CGCompareList.to_csv() → final_cg_compare_list.csv
+   save_reaction_frames() → reaction_frames.npz
+```
+
+---
+
 ## 许可证
 
 MIT License
@@ -1103,6 +1484,39 @@ MIT License
 ---
 
 ## 更新日志
+
+### v2.4 (2026-06-03)
+- **输出文件精简重构**
+  - 移除 `bonds_records/` 目录输出（功能已由 `reaction_frames.npz` 替代）
+  - 移除 `changed_bead_id_list.pkl` 输出（重构遗留的废弃文件）
+  - 精简 `reaction_frames.npz` 格式：从 11 个数组减至 7 个数组
+    - 移除：`aa_ids`, `aa_types`, `cg_bonds_before`, `cg_bonds_after`
+    - `cg_bonds` 由后处理从 `aa_bonds + cg_mapping` 推导
+    - `aa_ids` 从 `cg_mapping[:, 3]` (AA_id 列) 获取
+  - 后处理代码（`reaction_frames_parser.py`, `reaction_pairs.py`, `non_react_pairs.py`）添加自动格式检测和推导逻辑
+  - 向后兼容：旧格式 npz 仍可正常读取
+- 更新 README 文档，反映新的输出格式
+
+### v2.3 (2026-05-19)
+- 完善 README 文档
+  - 新增主循环执行顺序详细说明
+  - 新增模块依赖关系图和数据流说明
+  - 新增所有 CLI 脚本说明 (build_cg_system.py, data2gro.py)
+  - 新增 CGTopology API 参考
+  - 新增 ReactionLocator API 参考
+- 代码结构完善
+  - scripts/ 目录新增 build_cg_system.py, data2gro.py
+  - config/ 目录新增 mapping/, reactions/ 子目录
+
+### v2.2 (2026-04-29)
+- 新增CLI脚本
+  - `calc_dist.py`: 分布计算命令行工具
+  - `plot_dist.py`: 分布绘图命令行工具
+  - `yaml2csv_mapping.py`: YAML到CSV映射转换工具
+- 新增 `CGInitializer` / `CGSystem` / `initialize_cg_system` 模块
+- smooth_utils 扩展: 新增 constants, io, preprocess, peaks, zones, quality, optimize, angle_dihedral, report, dist_config, dist_plot 模块
+- 修正脚本调用方式 (scripts/ 无 `__init__.py`, 使用直接执行方式)
+- 修正 API 文档: `compare_two_bonds` 返回值顺序、`atom_bonds_to_cg_bonds` 参数说明
 
 ### v2.1 (2026-04-02)
 - 新增工具模块 (`LmpPy/tools/`)

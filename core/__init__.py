@@ -13,7 +13,12 @@ from .config_loader import (
     ReactionConfig,
     MappingConfig,
     ConfigError,
-    load_all_configs
+    ValidationIssue,
+    ValidationResult,
+    ConfigValidator,
+    load_all_configs,
+    validate_config,
+    load_reactions_from_directory,
 )
 
 from .mapping_generator import (
@@ -108,7 +113,12 @@ __all__ = [
     'ReactionConfig',
     'MappingConfig',
     'ConfigError',
+    'ValidationIssue',
+    'ValidationResult',
+    'ConfigValidator',
     'load_all_configs',
+    'validate_config',
+    'load_reactions_from_directory',
     # mapping_generator
     'MappingGenerator',
     'CGCompareList',

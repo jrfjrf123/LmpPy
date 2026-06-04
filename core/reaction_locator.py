@@ -3,9 +3,10 @@
 
 功能:
 - 从键变化定位反应类型和位点
-- k-hop邻域提取 (BFS)
-- 局部键连矩阵构建
+- 使用 created_bonds 聚类同一反应的原子
+- k-hop 邻域提取 (BFS)
 - 模板匹配 (子图同构)
+- pre-before + post-after 双重匹配
 
 作者: Claude
 日期: 2026-03-26
@@ -14,6 +15,7 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Set, Optional, Tuple
 from collections import defaultdict, deque
+import time
 import numpy as np
 
 # 支持两种导入方式
@@ -42,155 +44,392 @@ class ReactionLocator:
     """
     反应位点定位器
 
-    功能:
-    - 从键变化定位反应位点
-    - 模板匹配识别反应类型
+    匹配策略: pre-before + post-after 双重验证
+    - 用 created_bonds 聚类同一反应的原子
+    - pre template × before 体系: 验证反应前的原子拓扑
+    - post template × after 体系: 验证反应后的原子拓扑
+    - 两者都匹配才确认反应
     """
 
     def __init__(self, reaction_templates: Dict[str, ReactionTemplate]):
-        """
-        初始化定位器
-
-        Args:
-            reaction_templates: 反应模板字典 {name: ReactionTemplate}
-        """
         self.reaction_templates = reaction_templates
 
     def locate(self, bonds_before: np.ndarray, bonds_after: np.ndarray,
-               atom_types: np.ndarray, n_atoms: int) -> List[ReactionMatch]:
+               types_before: np.ndarray, types_after: np.ndarray,
+               ids_before: np.ndarray, ids_after: np.ndarray,
+               n_atoms: int) -> List[ReactionMatch]:
         """
         定位反应位点
 
         Args:
             bonds_before: 反应前的键 (n_bonds, 3)
             bonds_after: 反应后的键 (n_bonds, 3)
-            atom_types: 原子类型数组 (n_atoms,) 或 (n_atoms+1,)
+            types_before: 反应前的原子类型 (0-based, gather_atoms 返回的原始顺序)
+            types_after: 反应后的原子类型
+            ids_before: 反应前的原子ID (与 types_before 同序)
+            ids_after: 反应后的原子ID
             n_atoms: 原子总数
 
         Returns:
             List[ReactionMatch]: 匹配结果列表
         """
-        # 检测键变化
+        # 构建 atom_id → type 映射 (因为 gather_atoms 不保证按 ID 排序)
+        _t0 = time.time()
+        # 用 numpy 数组替代 dict: O(N) 批量赋值 vs 3 万次 dict 插入
+        max_id = max(int(ids_before.max()), int(ids_after.max()))
+        type_before_arr = np.zeros(max_id + 1, dtype=np.int32)
+        type_before_arr[ids_before.astype(np.int32)] = types_before
+        type_after_arr = np.zeros(max_id + 1, dtype=np.int32)
+        type_after_arr[ids_after.astype(np.int32)] = types_after
+        _t1 = time.time()
+        _t1 = time.time()
         from .bond_detector import BondDetector
         detector = BondDetector(n_atoms)
         bond_changes = detector.detect(bonds_before, bonds_after)
+        _t2 = time.time()
 
         if not bond_changes.has_changes:
             return []
 
-        # 获取参与反应的原子
-        changed_atoms = get_changed_atoms(bond_changes)
-
         # 构建键连图
         graph_before = self._build_graph(bonds_before, n_atoms)
         graph_after = self._build_graph(bonds_after, n_atoms)
+        _t3 = time.time()
 
-        # 对每个反应模板进行匹配
+        # 用 created_bonds 聚类同一反应的原子
+        components = self._cluster_by_created_bonds(bond_changes, graph_before)
+        _t4 = time.time()
+
+        # 对每个反应组件 + 每个反应模板进行双重匹配
         matches = []
-        for name, template in self.reaction_templates.items():
-            match = self._match_template(
-                template,
-                changed_atoms,
-                graph_before,
-                graph_after,
-                atom_types,
-                bond_changes
-            )
-            if match:
-                matches.append(match)
+        _t_pre_total = 0.0
+        _t_post_total = 0.0
+        for component in components:
+            for name, template in self.reaction_templates.items():
+                _tp = time.time()
+                pre_match = self._match_pre_template(
+                    template, graph_before, type_before_arr, bond_changes, n_atoms, component
+                )
+                _t_pre_total += time.time() - _tp
+                if not pre_match:
+                    continue
+
+                _tp2 = time.time()
+                post_match = self._match_post_template(
+                    template, graph_after, type_after_arr, pre_match, n_atoms
+                )
+                _t_post_total += time.time() - _tp2
+                if not post_match:
+                    continue
+
+                post_match.reaction_name = name
+                matches.append(post_match)
+        _t5 = time.time()
+
+        # print(f"  [locate计时] type_map: {(_t1-_t0)*1000:.1f}ms, "
+        #       f"BondDetector: {(_t2-_t1)*1000:.1f}ms, "
+        #       f"build_graph: {(_t3-_t2)*1000:.1f}ms, "
+        #       f"clustering: {(_t4-_t3)*1000:.1f}ms, "
+        #       f"pre_match总计: {_t_pre_total*1000:.1f}ms, "
+        #       f"post_match总计: {_t_post_total*1000:.1f}ms, "
+        #       f"locate总: {(_t5-_t0)*1000:.1f}ms")
 
         return matches
 
+    def _cluster_by_created_bonds(self, bond_changes: BondChanges,
+                                   graph_before: Dict[int, List[int]]) -> List[Set[int]]:
+        """
+        使用 created_bonds 聚类同一反应的原子
+
+        策略:
+        1. 从 created_bonds 构建图，BFS 找出连通分量
+           (同一个 created bond 的两个原子在同一反应中)
+        2. 对于不在 created_bonds 中的 changed atoms (如 deleted bonds 的原子),
+           如果与某个 component 在 before 图中相邻，合并进去
+        """
+        # Step 1: 从 created_bonds 构建图
+        created_graph = defaultdict(set)
+        atoms_in_created = set()
+
+        if len(bond_changes.created_bonds) > 0:
+            for bond in bond_changes.created_bonds:
+                a1, a2 = int(bond[1]), int(bond[2])
+                created_graph[a1].add(a2)
+                created_graph[a2].add(a1)
+                atoms_in_created.add(a1)
+                atoms_in_created.add(a2)
+
+        # BFS 找出 created_bonds 的连通分量
+        visited = set()
+        components = []
+
+        for start_atom in atoms_in_created:
+            if start_atom in visited:
+                continue
+            component = set()
+            queue = deque([start_atom])
+            while queue:
+                atom = queue.popleft()
+                if atom in visited:
+                    continue
+                visited.add(atom)
+                component.add(atom)
+                for nb in created_graph.get(atom, []):
+                    if nb not in visited:
+                        queue.append(nb)
+            if component:
+                components.append(component)
+
+        # Step 2: 将不在 created_bonds 中的 changed atoms 合并到相邻 component
+        all_changed = get_changed_atoms(bond_changes)
+        orphaned = all_changed - atoms_in_created
+
+        for orphan in orphaned:
+            # 查找 before 图中的邻居属于哪个 component
+            merged = False
+            for nb in graph_before.get(orphan, []):
+                for comp in components:
+                    if nb in comp:
+                        comp.add(orphan)
+                        merged = True
+                        break
+                if merged:
+                    break
+            if not merged:
+                # 没有找到相邻 component，自成一组
+                components.append({orphan})
+
+        return components
+
     def _build_graph(self, bonds: np.ndarray, n_atoms: int) -> Dict[int, List[int]]:
-        """
-        构建邻接图
-
-        Args:
-            bonds: 键数组
-            n_atoms: 原子总数
-
-        Returns:
-            邻接表 {atom_id: [neighbor_ids]}
-        """
+        """构建邻接表（只包含有键的原子，下游用 graph.get(atom, []) 处理缺失键）"""
         graph = defaultdict(list)
         for bond in bonds:
             a1, a2 = int(bond[1]), int(bond[2])
             graph[a1].append(a2)
             graph[a2].append(a1)
-
-        # 确保所有原子在图中
-        for i in range(1, n_atoms + 1):
-            if i not in graph:
-                graph[i] = []
-
         return dict(graph)
 
-    def _match_template(self, template: ReactionTemplate,
-                        changed_atoms: Set[int],
-                        graph_before: Dict[int, List[int]],
-                        graph_after: Dict[int, List[int]],
-                        atom_types: np.ndarray,
-                        bond_changes: BondChanges) -> Optional[ReactionMatch]:
+    def _match_pre_template(self, template: ReactionTemplate,
+                            graph_before: Dict[int, List[int]],
+                            type_before_arr: np.ndarray,
+                            bond_changes: BondChanges,
+                            n_atoms: int,
+                            component: Set[int]) -> Optional[ReactionMatch]:
         """
-        匹配单个模板
-
-        Args:
-            template: 反应模板
-            changed_atoms: 参与反应的原子
-            graph_before: 反应前的键连图
-            graph_after: 反应后的键连图
-            atom_types: 原子类型
-            bond_changes: 键变化
-
-        Returns:
-            ReactionMatch 或 None
+        用 pre template 匹配反应前的体系
+        针对单个反应组件进行匹配
         """
-        # 检查键变化是否匹配模板
-        template_created = template.created_bonds
-        template_deleted = template.deleted_bonds
-
-        # 如果模板没有键变化，跳过
-        if not template_created and not template_deleted:
+        # 粗筛
+        if not template.created_bonds and not template.deleted_bonds:
+            return None
+        if template.created_bonds and not bond_changes.created_codes:
+            return None
+        if template.deleted_bonds and not bond_changes.deleted_codes:
             return None
 
-        # 检查创建的键是否匹配
-        if template_created:
-            # 模板中有创建的键，检查体系中是否有对应的新键
-            if not bond_changes.created_codes:
-                return None
-
-        # 检查删除的键是否匹配
-        if template_deleted:
-            if not bond_changes.deleted_codes:
-                return None
-
-        # 提取反应邻域 (k-hop)
-        neighborhood = self._extract_neighborhood(changed_atoms, graph_after, k_hop=2)
+        # 从该组件提取 k-hop 邻域
+        max_k = max(template.pre_template.n_atoms, 2)
+        neighborhood = self._extract_neighborhood(component, graph_before, k_hop=max_k)
 
         if len(neighborhood) < template.pre_template.n_atoms:
             return None
 
-        # 尝试子图匹配
-        match_result = self._subgraph_match(
-            template, neighborhood, graph_before, graph_after, atom_types
+        return self._bfs_match(
+            template.pre_template,
+            template.pre_template.atom_types,
+            template.reaction_map.initiator_ids,
+            neighborhood, graph_before, type_before_arr,
+            handle_isolated=True
         )
 
-        return match_result
+    def _match_post_template(self, template: ReactionTemplate,
+                             graph_after: Dict[int, List[int]],
+                             type_after_arr: np.ndarray,
+                             pre_match: ReactionMatch,
+                             n_atoms: int) -> Optional[ReactionMatch]:
+        """
+        用 post template 匹配反应后的体系
+        使用 pre 匹配结果中的体系原子作为起点
+        """
+        # 从 pre 匹配结果获取体系原子，作为后匹配的起点
+        system_atoms = pre_match.get_system_atoms()
+        max_k = max(template.post_template.n_atoms, 2)
+        neighborhood = self._extract_neighborhood(system_atoms, graph_after, k_hop=max_k)
+
+        return self._bfs_match(
+            template.post_template,
+            template.post_template.atom_types,
+            template.reaction_map.initiator_ids,
+            neighborhood, graph_after, type_after_arr,
+            handle_isolated=False
+        )
+
+    def _bfs_match(self, template_data: TemplateData,
+                   template_types: np.ndarray,
+                   start_ids: List[int],
+                   neighborhood: Set[int],
+                   graph: Dict[int, List[int]],
+                   atom_type_arr: np.ndarray,
+                   handle_isolated: bool = False) -> Optional[ReactionMatch]:
+        """
+        通用 BFS 匹配
+
+        Args:
+            template_data: 模板数据（pre 或 post）
+            template_types: 模板原子类型
+            start_ids: initiator atom ID 列表（匹配起点，替代 edge atoms）
+            neighborhood: 候选原子集合
+            graph: 体系键连图
+            atom_type_arr: numpy 数组，atom_type_arr[atom_id] 直接索引（避免 gather_atoms 顺序依赖）
+            handle_isolated: 是否处理孤立原子（pre 需要，post 不需要）
+        """
+        if not start_ids:
+            return None
+
+        template_graph = self._build_template_graph(template_data)
+        n_template = template_data.n_atoms
+
+        # 获取 bonded atoms
+        bonded_atoms = set()
+        for bond in template_data.bonds:
+            bonded_atoms.add(int(bond[2]))
+            bonded_atoms.add(int(bond[3]))
+
+        # 只遍历与 initiator type 匹配的候选原子
+        initiator_types = {template_types[s] for s in start_ids}
+        neighborhood_list = [a for a in neighborhood if atom_type_arr[a] in initiator_types]
+
+        for candidate in neighborhood_list:
+            for start_atom in start_ids:
+                tmpl_type = template_types[start_atom]
+                if atom_type_arr[candidate] == tmpl_type:
+                    mapping = self._bfs_from_start(
+                        start_atom, candidate, template_graph, template_types,
+                        neighborhood, graph, atom_type_arr
+                    )
+                    if mapping is None:
+                        continue
+
+                    # 检查未匹配的原子
+                    unmatched = set(range(1, n_template + 1)) - set(mapping.keys())
+                    matched_sys = set(mapping.values())
+
+                    if unmatched:
+                        # === 统一多起点 BFS：处理模板图可能不连通的情况 ===
+                        # pre-template: 反应前两个分子未连接，需从两个 initiator 分别匹配
+                        # post-template: 通常连通（单起点足够），但统一处理以保持健壮性
+                        non_isolated = unmatched & bonded_atoms
+                        if non_isolated:
+                            # 尝试用其他 start_ids 匹配剩余的不连通组件
+                            remaining_starts = [s for s in start_ids if s not in mapping]
+                            for rem_start in remaining_starts:
+                                rem_type = template_types[rem_start]
+                                # 在邻域中找一个未使用且类型匹配的候选原子
+                                found_candidate = None
+                                for sa in neighborhood:
+                                    if sa in matched_sys:
+                                        continue
+                                    if atom_type_arr[sa] == rem_type:
+                                        found_candidate = sa
+                                        break
+
+                                if found_candidate is not None:
+                                    sub_mapping = self._bfs_from_start(
+                                        rem_start, found_candidate, template_graph,
+                                        template_types, neighborhood, graph, atom_type_arr
+                                    )
+                                    if sub_mapping is not None:
+                                        # 合并映射（不同组件应无重叠）
+                                        for k, v in sub_mapping.items():
+                                            if k not in mapping:
+                                                mapping[k] = v
+                                                matched_sys.add(v)
+
+                            # 重新检查是否所有非孤立原子都已匹配
+                            unmatched = set(range(1, n_template + 1)) - set(mapping.keys())
+                            non_isolated = unmatched & bonded_atoms
+                            if non_isolated:
+                                continue  # 仍有未匹配的非孤立原子 → pre/post 都拒绝
+
+                        # === 处理剩余未匹配原子 ===
+                        if unmatched:
+                            if handle_isolated:
+                                # pre-match: 剩余原子必须是孤立原子（无键连接）
+                                all_isolated_ok = True
+                                for ta in unmatched:
+                                    tt = template_types[ta]
+                                    found = False
+                                    for sa in neighborhood:
+                                        if sa in matched_sys:
+                                            continue
+                                        if atom_type_arr[sa] == tt:
+                                            mapping[ta] = sa
+                                            matched_sys.add(sa)
+                                            found = True
+                                            break
+                                    if not found:
+                                        all_isolated_ok = False
+                                        break
+                                if not all_isolated_ok:
+                                    continue
+                            else:
+                                # post-match: 不允许有任何未匹配原子
+                                continue
+
+                    return ReactionMatch(
+                        reaction_name="",
+                        template_to_system=mapping,
+                        confidence=1.0
+                    )
+
+        return None
+
+    def _bfs_from_start(self, start_atom: int, candidate: int,
+                       template_graph: Dict[int, List[int]],
+                       template_types: np.ndarray,
+                       neighborhood: Set[int],
+                       graph: Dict[int, List[int]],
+                       atom_type_arr: np.ndarray) -> Optional[Dict[int, int]]:
+        """
+        从 initiator atom 开始 BFS 匹配
+        返回 {template_atom_id: system_atom_id} 或 None
+        """
+        mapping = {start_atom: candidate}
+        queue = deque([start_atom])
+        visited = {start_atom}
+
+        while queue:
+            tmpl_atom = queue.popleft()
+            sys_atom = mapping[tmpl_atom]
+
+            for tmpl_nb in template_graph.get(tmpl_atom, []):
+                if tmpl_nb in visited:
+                    continue
+
+                tmpl_nb_type = template_types[tmpl_nb]
+                found = False
+                for sys_nb in graph.get(sys_atom, []):
+                    if sys_nb in mapping.values():
+                        continue
+                    if sys_nb not in neighborhood:
+                        continue
+                    if atom_type_arr[sys_nb] == tmpl_nb_type:
+                        mapping[tmpl_nb] = sys_nb
+                        visited.add(tmpl_nb)
+                        queue.append(tmpl_nb)
+                        found = True
+                        break
+
+                if not found:
+                    return None
+
+        return mapping
 
     def _extract_neighborhood(self, start_atoms: Set[int],
                               graph: Dict[int, List[int]],
                               k_hop: int = 2) -> Set[int]:
-        """
-        提取k-hop邻域
-
-        Args:
-            start_atoms: 起始原子集合
-            graph: 键连图
-            k_hop: hop数
-
-        Returns:
-            邻域原子集合
-        """
+        """提取k-hop邻域"""
         visited = set()
         current = set(start_atoms)
 
@@ -207,133 +446,8 @@ class ReactionLocator:
 
         return visited
 
-    def _subgraph_match(self, template: ReactionTemplate,
-                        neighborhood: Set[int],
-                        graph_before: Dict[int, List[int]],
-                        graph_after: Dict[int, List[int]],
-                        atom_types: np.ndarray) -> Optional[ReactionMatch]:
-        """
-        子图匹配
-
-        Args:
-            template: 反应模板
-            neighborhood: 邻域原子集合
-            graph_before: 反应前的键连图
-            graph_after: 反应后的键连图
-            atom_types: 原子类型
-
-        Returns:
-            ReactionMatch 或 None
-        """
-        template_atoms = list(range(1, template.pre_template.n_atoms + 1))
-        template_graph = self._build_template_graph(template.pre_template)
-
-        # 获取模板原子类型
-        template_types = template.pre_template.atom_types
-
-        # 在邻域中寻找匹配
-        neighborhood_list = list(neighborhood)
-
-        # 简化匹配: 基于edge_atoms和initiator_atoms
-        edge_atoms = template.reaction_map.edge_ids
-        initiator_atoms = template.reaction_map.initiator_ids
-
-        if not edge_atoms and not initiator_atoms:
-            return None
-
-        # 遍历邻域中的候选原子对
-        for candidate in neighborhood_list:
-            # 检查原子类型是否匹配edge atom
-            for edge_atom in edge_atoms:
-                template_type = template_types[edge_atom]
-                if atom_types[candidate] == template_type:
-                    # 尝试从该候选原子开始匹配
-                    match = self._try_match_from_edge(
-                        template, candidate, edge_atom,
-                        neighborhood, graph_after, atom_types
-                    )
-                    if match:
-                        return match
-
-        return None
-
-    def _try_match_from_edge(self, template: ReactionTemplate,
-                             candidate: int, edge_atom: int,
-                             neighborhood: Set[int],
-                             graph: Dict[int, List[int]],
-                             atom_types: np.ndarray) -> Optional[ReactionMatch]:
-        """
-        从edge atom尝试匹配
-
-        Args:
-            template: 反应模板
-            candidate: 候选原子ID
-            edge_atom: 模板中的edge atom ID
-            neighborhood: 邻域
-            graph: 键连图
-            atom_types: 原子类型
-
-        Returns:
-            ReactionMatch 或 None
-        """
-        template_types = template.pre_template.atom_types
-        template_graph = self._build_template_graph(template.pre_template)
-
-        # BFS匹配
-        mapping = {edge_atom: candidate}
-        queue = deque([edge_atom])
-        visited = {edge_atom}
-
-        while queue:
-            template_atom = queue.popleft()
-            system_atom = mapping[template_atom]
-
-            # 检查邻居
-            for template_neighbor in template_graph.get(template_atom, []):
-                if template_neighbor in visited:
-                    continue
-
-                # 获取模板邻居的类型
-                template_neighbor_type = template_types[template_neighbor]
-
-                # 在体系图中查找匹配的邻居
-                found = False
-                for system_neighbor in graph.get(system_atom, []):
-                    if system_neighbor in mapping.values():
-                        continue
-                    if system_neighbor not in neighborhood:
-                        continue
-                    if atom_types[system_neighbor] == template_neighbor_type:
-                        mapping[template_neighbor] = system_neighbor
-                        visited.add(template_neighbor)
-                        queue.append(template_neighbor)
-                        found = True
-                        break
-
-                if not found:
-                    # 匹配失败
-                    return None
-
-        # 检查是否所有模板原子都匹配
-        if len(mapping) != template.pre_template.n_atoms:
-            return None
-
-        return ReactionMatch(
-            reaction_name=template.name,
-            template_to_system=mapping,
-            confidence=1.0
-        )
-
     def _build_template_graph(self, template_data: TemplateData) -> Dict[int, List[int]]:
-        """
-        从模板数据构建键连图
-
-        Args:
-            template_data: 模板数据
-
-        Returns:
-            邻接表
-        """
+        """从模板数据构建键连图"""
         graph = defaultdict(list)
         for bond in template_data.bonds:
             a1, a2 = int(bond[2]), int(bond[3])
@@ -343,23 +457,14 @@ class ReactionLocator:
 
 
 def locate_reactions(bonds_before: np.ndarray, bonds_after: np.ndarray,
-                     atom_types: np.ndarray, n_atoms: int,
+                     types_before: np.ndarray, types_after: np.ndarray,
+                     ids_before: np.ndarray, ids_after: np.ndarray,
+                     n_atoms: int,
                      reaction_templates: Dict[str, ReactionTemplate]) -> List[ReactionMatch]:
-    """
-    便捷函数：定位反应
-
-    Args:
-        bonds_before: 反应前的键
-        bonds_after: 反应后的键
-        atom_types: 原子类型
-        n_atoms: 原子总数
-        reaction_templates: 反应模板字典
-
-    Returns:
-        匹配结果列表
-    """
+    """便捷函数：定位反应"""
     locator = ReactionLocator(reaction_templates)
-    return locator.locate(bonds_before, bonds_after, atom_types, n_atoms)
+    return locator.locate(bonds_before, bonds_after, types_before, types_after,
+                          ids_before, ids_after, n_atoms)
 
 
 if __name__ == "__main__":
@@ -369,10 +474,8 @@ if __name__ == "__main__":
     print("测试反应位点定位器")
     print("=" * 60)
 
-    # 创建模拟数据
     n_atoms = 100
 
-    # 模拟键数据
     bonds_before = np.array([
         [1, 1, 2],
         [1, 2, 3],
@@ -387,10 +490,9 @@ if __name__ == "__main__":
         [1, 3, 4],
         [1, 10, 11],
         [1, 11, 12],
-        [2, 5, 6],  # 新键
+        [2, 5, 6],
     ], dtype=np.int32)
 
-    # 原子类型
     atom_types = np.zeros(n_atoms + 1, dtype=np.int32)
     atom_types[1:20] = 1
     atom_types[5] = 2
@@ -405,17 +507,5 @@ if __name__ == "__main__":
 
     changed_atoms = get_changed_atoms(changes)
     print(f"  参与反应的原子: {changed_atoms}")
-
-    print("\n测试邻域提取:")
-    graph_after = defaultdict(list)
-    for bond in bonds_after:
-        a1, a2 = int(bond[1]), int(bond[2])
-        graph_after[a1].append(a2)
-        graph_after[a2].append(a1)
-
-    locator = ReactionLocator({})
-    neighborhood = locator._extract_neighborhood(changed_atoms, graph_after, k_hop=2)
-    print(f"  邻域大小: {len(neighborhood)}")
-    print(f"  邻域原子: {neighborhood}")
 
     print("\n✅ 测试完成!")

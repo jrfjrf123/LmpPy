@@ -1,0 +1,249 @@
+# =============================================================================
+# mlcgsim Output Analysis — Plot Configuration
+# =============================================================================
+# 三层优先级: CLI parameters > this YAML file > dataclass hard-coded defaults
+# 未设置的字段自动回退到下一级默认值，所有字段均可选。
+#
+# 使用方法:
+#   python -m mlcgsim.output_analysis all <output_dir> --plot-config plot_config.yaml
+# =============================================================================
+
+# ---- 全局默认 (所有图表共享) ----
+default:
+  figure:
+    dpi: 150
+    figsize: [10, 6]
+    save_format: "png"
+
+  font:
+    family: "DejaVu Sans"
+    title_size: 14
+    label_size: 12
+    tick_size: 10
+    legend_size: 9
+
+  histogram:
+    alpha: 0.4            # 直方图透明度 (30-50%)
+    edge_color: "white"
+    bins: 50
+    color: "#4C72B0"      # 蓝色
+
+  kde:
+    bandwidth: "scott"    # "scott" | "silverman" | float因子如 "0.5"
+    linewidth: 2.0
+    linestyle: "-"
+    alpha: 0.85
+    color: "#FF7F0E"      # 橙色
+
+  theory_line:
+    linewidth: 2.0
+    linestyle: "-"
+    alpha: 0.85
+    color: "#DD4444"      # 红色
+
+  reference:
+    alpha: 0.4
+    edge_color: "white"
+    bins: 50
+    color: "#DD8452"      # 棕色
+
+  legend:
+    loc: "best"
+    frame_alpha: 0.8
+    font_size: 9
+
+  axis:
+    title: ""             # 空 = 使用内置默认标题
+    xlabel: ""
+    ylabel: ""
+    title_fontsize: 14
+    label_fontsize: 12
+    title_pad: 10.0
+    label_pad: 8.0
+
+  mean_line:
+    linewidth: 1.5
+    linestyle: "--"
+    alpha: 0.6
+    color: "red"
+
+
+# ---- 链长分布图 (覆盖 default) ----
+# 实际使用: figure, font, histogram, kde, theory_line, legend, axis, mean_line
+chain_length:
+  figure:
+    dpi: 150
+    figsize: [10, 6]
+    save_format: "png"
+
+  font:
+    family: "DejaVu Sans"
+    title_size: 14
+    label_size: 12
+    tick_size: 10
+    legend_size: 9
+
+  histogram:
+    alpha: 0.4
+    edge_color: "white"
+    bins: 50
+    color: "#4C72B0"
+
+  kde:
+    bandwidth: "scott"
+    linewidth: 2.0
+    linestyle: "-"
+    alpha: 0.85
+    color: "#FF7F0E"
+
+  theory_line:
+    linewidth: 2.0
+    linestyle: "-"
+    alpha: 0.85
+    color: "#DD4444"
+
+  legend:
+    loc: "best"
+    frame_alpha: 0.8
+    font_size: 9
+
+  axis:
+    title: ""
+    xlabel: ""
+    ylabel: ""
+    title_fontsize: 14
+    label_fontsize: 12
+    title_pad: 10.0
+    label_pad: 8.0
+
+  mean_line:
+    linewidth: 1.5
+    linestyle: "--"
+    alpha: 0.6
+    color: "red"
+
+  # 以下 chain_length 未使用，仅展示可配项:
+  # reference:
+  #   alpha: 0.4
+  #   edge_color: "white"
+  #   bins: 50
+  #   color: "#DD8452"
+
+
+# ---- 距离分布图 (覆盖 default) ----
+# 实际使用: figure, font, histogram, reference, legend, axis, mean_line
+distance:
+  figure:
+    dpi: 150
+    figsize: [6, 5]       # 每个反应类型一个子图宽度，实际宽度 = figsize[0] * N_types
+    save_format: "png"
+
+  font:
+    family: "DejaVu Sans"
+    title_size: 14
+    label_size: 12
+    tick_size: 10
+    legend_size: 9
+
+  histogram:
+    alpha: 0.5            # 距离分布直方图稍浓一些
+    edge_color: "white"
+    bins: 50
+    color: "#4C72B0"
+
+  reference:
+    alpha: 0.4
+    edge_color: "white"
+    bins: 50
+    color: "#DD8452"
+
+  legend:
+    loc: "best"
+    frame_alpha: 0.8
+    font_size: 9
+
+  axis:
+    title: ""
+    xlabel: ""
+    ylabel: ""
+    title_fontsize: 14
+    label_fontsize: 12
+    title_pad: 10.0
+    label_pad: 8.0
+
+  mean_line:
+    linewidth: 1.5
+    linestyle: "--"
+    alpha: 0.6
+    color: "red"
+
+  # 以下 distance 未使用，仅展示可配项:
+  # kde:
+  #   bandwidth: "scott"
+  #   linewidth: 2.0
+  #   linestyle: "-"
+  #   alpha: 0.85
+  #   color: "#FF7F0E"
+  # theory_line:
+  #   linewidth: 2.0
+  #   linestyle: "-"
+  #   alpha: 0.85
+  #   color: "#DD4444"
+
+
+# ---- 反应统计图 (覆盖 default) ----
+# 实际使用: figure, font, legend, axis
+reaction_stats:
+  figure:
+    dpi: 150
+    figsize: [16, 6]
+    save_format: "png"
+
+  font:
+    family: "DejaVu Sans"
+    title_size: 14
+    label_size: 12
+    tick_size: 10
+    legend_size: 9
+
+  legend:
+    loc: "best"
+    frame_alpha: 0.8
+    font_size: 9
+
+  axis:
+    title: ""
+    xlabel: ""
+    ylabel: ""
+    title_fontsize: 14
+    label_fontsize: 12
+    title_pad: 10.0
+    label_pad: 8.0
+
+  # 以下 reaction_stats 未使用，仅展示可配项:
+  # histogram:
+  #   alpha: 0.4
+  #   edge_color: "white"
+  #   bins: 50
+  #   color: "#4C72B0"
+  # kde:
+  #   bandwidth: "scott"
+  #   linewidth: 2.0
+  #   linestyle: "-"
+  #   alpha: 0.85
+  #   color: "#FF7F0E"
+  # theory_line:
+  #   linewidth: 2.0
+  #   linestyle: "-"
+  #   alpha: 0.85
+  #   color: "#DD4444"
+  # reference:
+  #   alpha: 0.4
+  #   edge_color: "white"
+  #   bins: 50
+  #   color: "#DD8452"
+  # mean_line:
+  #   linewidth: 1.5
+  #   linestyle: "--"
+  #   alpha: 0.6
+  #   color: "red"

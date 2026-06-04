@@ -18,6 +18,7 @@ CG映射更新器模块
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 from copy import deepcopy
+import time
 import numpy as np
 
 # 支持两种导入方式
@@ -52,14 +53,12 @@ class CGMapping:
             CGMapping实例
         """
         mapping = np.zeros((n_atoms, 2), dtype=np.int32)
-
-        for row in cg_compare_list:
-            bead_id = int(row[0])
-            bead_type = int(row[2])
-            atom_id = int(row[3])
-
-            if 1 <= atom_id <= n_atoms:
-                mapping[atom_id - 1] = [bead_id, bead_type]
+        # 向量化: 直接用 AA_id 作为索引
+        atom_ids = cg_compare_list[:, 3].astype(np.int32)
+        valid = (atom_ids >= 1) & (atom_ids <= n_atoms)
+        idx = atom_ids[valid] - 1  # 转 0-based
+        mapping[idx, 0] = cg_compare_list[valid, 0].astype(np.int32)  # bead_id
+        mapping[idx, 1] = cg_compare_list[valid, 2].astype(np.int32)  # bead_type
 
         return cls(data=mapping, n_atoms=n_atoms)
 
@@ -95,15 +94,16 @@ class CGMapping:
         """
         n_atoms = self.n_atoms
         result = np.zeros((n_atoms, 5), dtype=np.float64)
-
-        for i in range(n_atoms):
-            atom_id = i + 1
-            bead_id = self.data[i, 0]
-            bead_type = self.data[i, 1]
-            mol_id = 1  # 需要从外部获取
-            mass = masses[i] if masses is not None else 1.0
-
-            result[i] = [bead_id, mol_id, bead_type, atom_id, mass]
+        # 向量化
+        atom_ids = np.arange(1, n_atoms + 1, dtype=np.float64)
+        result[:, 0] = self.data[:, 0].astype(np.float64)  # bead_id
+        result[:, 1] = 1.0  # mol_id
+        result[:, 2] = self.data[:, 1].astype(np.float64)  # bead_type
+        result[:, 3] = atom_ids  # AA_id
+        if masses is not None:
+            result[:, 4] = masses
+        else:
+            result[:, 4] = 1.0
 
         return result
 
@@ -152,6 +152,7 @@ class CGMapper:
             更新后的CG映射
         """
         # 检查模板是否有 CG 映射定义
+        _t0 = time.time()
         if template.post_cg_mapping is None:
             # 没有定义 CG 映射，返回原映射
             return CGMapping(
@@ -202,6 +203,9 @@ class CGMapper:
             for system_atom_id in system_atom_ids:
                 new_mapping.set_bead(system_atom_id, new_bead_id, bead_type)
 
+        _t1 = time.time()
+        # if _t1 - _t0 > 0.01:
+        #     print(f"      [update] 耗时: {(_t1-_t0)*1000:.1f}ms")
         return new_mapping
 
     def batch_update(self, cg_mapping: CGMapping,
@@ -218,13 +222,19 @@ class CGMapper:
         Returns:
             更新后的CG映射
         """
+        _t_start = time.time()
         current_mapping = cg_mapping
 
         for match in reaction_matches:
+            _t_upd = time.time()
             template = templates.get(match.reaction_name)
             if template:
                 current_mapping = self.update(current_mapping, match, template)
+            _t_upd_e = time.time() - _t_upd
+            # print(f"    [CGMapper] update match '{match.reaction_name}': {_t_upd_e*1000:.1f}ms")
 
+        _t_total = time.time() - _t_start
+        # print(f"    [CGMapper] batch_update 总计: {_t_total*1000:.1f}ms")
         return current_mapping
 
 

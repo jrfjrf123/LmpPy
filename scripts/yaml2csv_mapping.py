@@ -135,7 +135,7 @@ def yaml_to_csv(system_yaml_file, output_csv='AtomId_BeadId_compare_list.csv', c
         if not Path(mapping_file).exists():
             # Try relative to system.yaml directory
             system_dir = Path(system_yaml_file).parent
-            mapping_file = system_dir / Path(mapping_file).name
+            mapping_file = system_dir / mapping_file  # 使用完整相对路径，而非只取文件名
         
         # Process each copy of this mapping file
         for copy_idx in range(num_copies):
@@ -213,12 +213,29 @@ if __name__ == "__main__":
     # 硬编码的自定义 bead type 映射
     # 根据需要修改此字典
     # ========================================
+
+    # PIP custom bead type mapping:
     CUSTOM_BEAD_TYPE_MAP = {
-        "bead1": 2,
-        "bead2": 1, 
-        "bead3": 3,
+    "Bead1": 1,    # chain_bead
+    "Bead2": 2,    # chain_reactor_bead
+    "IP": 3,    # monomoer(IP)
+
     }
 
+    """
+    # EPR custom bead type mapping:
+
+    CUSTOM_BEAD_TYPE_MAP = {
+    "Bead1": 1,    # chain E
+    "Bead2": 2,    # chain P
+    "Bead3": 3,    # chain reactor E
+    "Bead4": 4,    # chain reactor P 
+    "Bead5": 5,    # E
+    "Bead6": 6,    # P
+    "Bead7": 1,    # chain head E
+    "Bead6": 2     # chain head P
+    }
+    """
     # Select bead type map
     custom_bead_type_map = CUSTOM_BEAD_TYPE_MAP if args.custom else None
 

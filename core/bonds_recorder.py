@@ -16,6 +16,11 @@
     'reaction_type': str,
 }
 
+向后兼容说明:
+- 本模块保留用于读取历史模拟生成的 bonds_records 数据
+- 新模拟不再生成 bonds_records 输出（已由 reaction_frames.npz 替代）
+- 参见 run_refactored.py 中的 reaction_frames 输出
+
 作者: Claude
 日期: 2026-03-26
 """

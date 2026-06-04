@@ -36,8 +36,7 @@ def validate_cg_mapping_consistency(cg_compare_list: np.ndarray,
     """
     验证 CG 映射的一致性：确保每个 bead_id 的所有原子有相同的 bead_type
 
-    这是必须满足的约束，因为每个 bead_id 代表一个粗粒珠子，
-    一个粗粒珠子只能有一个 bead_type。
+    使用排序 + 相邻比较代替逐掩码扫描
 
     Args:
         cg_compare_list: CG映射 (n_rows, 5) [bead_id, mol_id, bead_type, AA_id, mass]
@@ -49,26 +48,30 @@ def validate_cg_mapping_consistency(cg_compare_list: np.ndarray,
     Raises:
         CGMappingValidationError: 当同一 bead_id 有不同的 bead_type 时
     """
-    # 向量化验证
-    bead_ids = cg_compare_list[:, 0].astype(int)
-    bead_types = cg_compare_list[:, 2].astype(int)  # 修复：[:, 2] 是 bead_type（[:, 1] 是 mol_id）
+    bead_ids = cg_compare_list[:, 0].astype(np.int32)
+    bead_types = cg_compare_list[:, 2].astype(np.int32)
 
-    # 获取唯一的 bead_id
-    unique_bead_ids = np.unique(bead_ids)
+    # 排序后相邻比较
+    sort_idx = np.argsort(bead_ids, kind='mergesort')
+    sorted_beads = bead_ids[sort_idx]
+    sorted_types = bead_types[sort_idx]
+
+    # 找分组边界
+    unique_bead_ids, first_idx, counts = np.unique(
+        sorted_beads, return_index=True, return_counts=True
+    )
 
     errors = []
     bead_id_to_type = {}
 
-    for bead_id in unique_bead_ids:
-        mask = bead_ids == bead_id
-        types_for_bead = bead_types[mask]
-        unique_types = np.unique(types_for_bead)
-
+    for i, bead_id in enumerate(unique_bead_ids):
+        start = first_idx[i]
+        end = start + counts[i]
+        unique_types = np.unique(sorted_types[start:end])
         if len(unique_types) > 1:
-            # 找出冲突的原子
             error_msg = (
                 f"Bead {bead_id} 有 {len(unique_types)} 个不同的 bead_type: {unique_types.tolist()}. "
-                f"涉及的原子索引: {np.where(mask)[0].tolist()[:10]}..."
+                f"涉及的原子索引: {np.where(sorted_beads[start:end] == bead_id)[0].tolist()[:10]}..."
             )
             errors.append(error_msg)
         else:
@@ -97,6 +100,15 @@ class CGConverter:
 
     # 缓存的bead到原子的映射
     bead_to_atoms: Dict[int, np.ndarray] = field(default_factory=dict)
+
+    # 缓存的bead_type (避免每次重新扫描 cg_compare_list)
+    bead_to_type: Dict[int, int] = field(default_factory=dict)
+
+    # 预计算的扁平化原子索引（加速向量化转换）
+    _flat_atom_indices: Optional[np.ndarray] = None  # 所有原子的 0-based 索引
+    _flat_bead_indices: Optional[np.ndarray] = None  # 每个原子对应的 bead 行索引
+    _bead_ids_sorted: Optional[np.ndarray] = None    # 排序后的 bead_id 数组
+    _n_beads: int = 0
 
     # 缓存的有效性标志
     cache_valid: bool = False
@@ -147,68 +159,98 @@ class CGConverter:
         self.cache_valid = False
         self.last_hash = None
         self.bead_to_atoms.clear()
+        self.bead_to_type.clear()
+        self._flat_atom_indices = None
+        self._flat_bead_indices = None
+        self._bead_ids_sorted = None
+        self._n_beads = 0
 
     def _build_index(self, cg_compare_list: np.ndarray):
         """
         构建bead到原子的索引
-
-        Args:
-            cg_compare_list: CG映射
+        使用排序分组代替逐掩码扫描，并预计算扁平化索引
         """
         self.bead_to_atoms.clear()
+        self.bead_to_type.clear()
 
-        # 获取唯一的bead_id
-        bead_ids = np.unique(cg_compare_list[:, 0]).astype(int)
+        # 提取列
+        bead_ids_col = cg_compare_list[:, 0].astype(np.int32)
+        bead_types_col = cg_compare_list[:, 2].astype(np.int32)
+        atom_ids_col = cg_compare_list[:, 3].astype(np.int32)
 
-        for bead_id in bead_ids:
-            # 找到属于该bead的所有原子ID
-            mask = cg_compare_list[:, 0] == bead_id
-            atom_ids = cg_compare_list[mask, 3].astype(int)  # AA_id
-            self.bead_to_atoms[bead_id] = atom_ids
+        # 按 bead_id 排序
+        sort_idx = np.argsort(bead_ids_col, kind='mergesort')
+        sorted_beads = bead_ids_col[sort_idx]
+        sorted_atoms = atom_ids_col[sort_idx]
+        sorted_types = bead_types_col[sort_idx]
+
+        # 找分组边界
+        unique_bead_ids, first_idx, counts = np.unique(
+            sorted_beads, return_index=True, return_counts=True
+        )
+
+        self._n_beads = len(unique_bead_ids)
+        self._bead_ids_sorted = unique_bead_ids
+
+        # 预计算扁平化索引
+        all_atom_ids = []
+        all_bead_rows = []
+        for i, bead_id in enumerate(unique_bead_ids):
+            start = first_idx[i]
+            end = start + counts[i]
+            self.bead_to_atoms[bead_id] = sorted_atoms[start:end]
+            self.bead_to_type[bead_id] = int(sorted_types[start])
+            all_atom_ids.append(sorted_atoms[start:end])
+            all_bead_rows.append(np.full(counts[i], i, dtype=np.int32))
+
+        all_atom_ids_flat = np.concatenate(all_atom_ids)
+        self._flat_atom_indices = all_atom_ids_flat - 1  # 转 0-based
+        self._flat_bead_indices = np.concatenate(all_bead_rows)
 
     def _convert_with_cache(self, atom_coords: np.ndarray,
                             cg_compare_list: np.ndarray,
                             mass_list: Dict[int, float]) -> np.ndarray:
         """
-        使用缓存的索引进行转换
-
-        Args:
-            atom_coords: 原子坐标
-            cg_compare_list: CG映射
-            mass_list: 质量映射
-
-        Returns:
-            CG坐标
+        使用缓存的索引进行转换（全向量化，无 Python 循环）
         """
-        cg_trj = []
+        n_beads = self._n_beads
+        has_masses = atom_coords.shape[1] >= 5
 
-        for bead_id, atom_ids in self.bead_to_atoms.items():
-            # 获取bead_type (假设同一个bead内原子类型一致)
-            # cg_compare_list格式: [bead_id, mol_id, bead_type, AA_id, mass]
-            # [:, 2]才是bead_type，[:, 1]是mol_id
-            mask = cg_compare_list[:, 0] == bead_id
-            bead_type = int(cg_compare_list[mask, 2][0])  # 修复：[:, 1]→[:, 2]
+        # 批量获取所有原子坐标和类型
+        atom_indices_0based = self._flat_atom_indices
 
-            # 获取原子坐标
-            # atom_coords格式: [id, type, x, y, z, ...] 或 [x, y, z, ...]
-            if atom_coords.shape[1] >= 5:
-                # 包含id和type
-                coords = atom_coords[atom_ids - 1, 2:5]
-                atom_types = atom_coords[atom_ids - 1, 1].astype(int)
-            else:
-                # 只有坐标
-                coords = atom_coords[atom_ids - 1, :3]
-                atom_types = np.ones(len(atom_ids), dtype=int)
+        if has_masses:
+            atom_xyz = atom_coords[atom_indices_0based, 2:5]
+            atom_types = atom_coords[atom_indices_0based, 1].astype(np.int32)
+        else:
+            atom_xyz = atom_coords[atom_indices_0based, :3]
+            atom_types = np.ones(len(atom_indices_0based), dtype=np.int32)
 
-            # 获取质量
-            masses = np.array([mass_list.get(int(t), 1.0) for t in atom_types])
+        # 向量化质量获取
+        unique_types = np.unique(atom_types)
+        type_to_mass = {int(t): mass_list.get(int(t), 1.0) for t in unique_types}
+        mass_values = np.array([type_to_mass[int(t)] for t in atom_types], dtype=np.float64)
 
-            # 计算质心
-            bead_coord = self._calculate_central_mass(coords, masses)
+        # 分组质心计算: np.add.at 做 scatter-add
+        weighted = mass_values[:, np.newaxis] * atom_xyz  # (n_atoms, 3)
 
-            cg_trj.append([bead_id, bead_type, *bead_coord])
+        sum_weighted = np.zeros((n_beads, 3), dtype=np.float64)
+        sum_masses = np.zeros(n_beads, dtype=np.float64)
+        np.add.at(sum_weighted, self._flat_bead_indices, weighted)
+        np.add.at(sum_masses, self._flat_bead_indices, mass_values)
 
-        return np.array(cg_trj)
+        # 归一化
+        valid = sum_masses > 0
+        centroids = np.zeros((n_beads, 3), dtype=np.float64)
+        centroids[valid] = sum_weighted[valid] / sum_masses[valid, np.newaxis]
+
+        # 构建输出
+        cg_trj = np.zeros((n_beads, 5), dtype=np.float64)
+        cg_trj[:, 0] = self._bead_ids_sorted
+        cg_trj[:, 1] = np.array([self.bead_to_type[bid] for bid in self._bead_ids_sorted], dtype=np.float64)
+        cg_trj[:, 2:5] = centroids
+
+        return cg_trj
 
     def _calculate_central_mass(self, coords: np.ndarray, masses: np.ndarray) -> np.ndarray:
         """

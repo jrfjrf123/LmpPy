@@ -49,8 +49,15 @@ def read_lammps_data(data_file: str) -> Dict:
     if not HAS_MDA:
         raise ImportError("需要安装MDAnalysis: pip install MDAnalysis")
 
-    # 使用MDAnalysis读取data文件
-    u = mda.Universe(data_file, format='DATA', atom_style='id resid type charge x y z')
+    # 尝试两种 atom_style: 7列(含charge) 和 6列(无charge)
+    for atom_style in ['id resid type charge x y z', 'id resid type x y z']:
+        try:
+            u = mda.Universe(data_file, format='DATA', atom_style=atom_style)
+            break
+        except Exception:
+            continue
+    else:
+        raise ValueError(f"无法解析LAMMPS data文件: {data_file}，支持 'id resid type charge x y z' 或 'id resid type x y z' 格式")
 
     # 提取原子信息
     atoms = u.atoms
@@ -220,19 +227,128 @@ def write_cg_data_file(filename: str, cg_data: Dict, cg_bonds: np.ndarray = None
     print(f"  Dihedrals: {n_dihedrals}")
 
 
+def derive_cg_topology(aa_data: Dict, mapping_csv: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    从 AA data + mapping CSV 自动推导 CG bonds/angles/dihedrals。
+
+    内部复用:
+      - LmpPy.utils.topology.derive_cg_bonds_from_aa() 做键映射
+      - LmpPy.core.cg_topology.derive_cg_topology_from_bonds() 做 angle/dihedral 推导
+
+    Args:
+        aa_data: 从read_lammps_data()获取的AA数据，必须包含'bonds'键
+        mapping_csv: CG映射CSV文件路径 (bead_id, mol_id, bead_type, AA_id, mass)
+
+    Returns:
+        (cg_bonds, cg_angles, cg_dihedrals):
+            - cg_bonds: np.ndarray (nbonds, 3) [type, bead1, bead2]
+            - cg_angles: np.ndarray (nangles, 4) [type, bead1, center, bead3]
+            - cg_dihedrals: np.ndarray (ndihedrals, 5) [type, b1, b2, b3, b4]
+    """
+    from LmpPy.utils.topology import derive_cg_bonds_from_aa
+    from LmpPy.core.cg_topology import derive_cg_topology_from_bonds
+
+    # 加载映射
+    mapping_dict = load_aa_to_cg_mapping(mapping_csv)
+
+    # 构建 bead_types 映射 {bead_id: bead_type}
+    bead_types = {bead_id: info['bead_type'] for bead_id, info in mapping_dict.items()}
+
+    # 从 AA bonds 推导 CG bonds（传入 bead_types）
+    cg_bonds = derive_cg_bonds_from_aa(aa_data['bonds'], mapping_dict, bead_types)
+
+    # 从 CG bonds 推导 angles 和 dihedrals（传入 bead_types）
+    if len(cg_bonds) > 0:
+        topology = derive_cg_topology_from_bonds(cg_bonds, bead_types=bead_types)
+        return cg_bonds, topology.angles, topology.dihedrals
+    else:
+        return (
+            cg_bonds,
+            np.array([], dtype=np.int32).reshape(0, 4),
+            np.array([], dtype=np.int32).reshape(0, 5),
+        )
+
+
+def export_cg_topology(cg_bonds: np.ndarray, cg_angles: np.ndarray,
+                       cg_dihedrals: np.ndarray, output_dir: str = ".",
+                       prefix: str = "cg"):
+    """
+    将推导的 CG 拓扑保存到文本文件。
+
+    创建文件: {prefix}_bonds.txt, {prefix}_angles.txt, {prefix}_dihedrals.txt
+
+    Args:
+        cg_bonds: CG bonds 数组
+        cg_angles: CG angles 数组
+        cg_dihedrals: CG dihedrals 数组
+        output_dir: 输出目录
+        prefix: 文件名前缀
+    """
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    if len(cg_bonds) > 0:
+        np.savetxt(out / f"{prefix}_bonds.txt", cg_bonds, fmt='%d')
+    if len(cg_angles) > 0:
+        np.savetxt(out / f"{prefix}_angles.txt", cg_angles, fmt='%d')
+    if len(cg_dihedrals) > 0:
+        np.savetxt(out / f"{prefix}_dihedrals.txt", cg_dihedrals, fmt='%d')
+
+    print(f"CG topology 已导出到: {out}")
+    if len(cg_bonds) > 0:
+        print(f"  Bonds: {len(cg_bonds)} -> {prefix}_bonds.txt")
+    if len(cg_angles) > 0:
+        print(f"  Angles: {len(cg_angles)} -> {prefix}_angles.txt")
+    if len(cg_dihedrals) > 0:
+        print(f"  Dihedrals: {len(cg_dihedrals)} -> {prefix}_dihedrals.txt")
+
+
+def export_cg_bead_info(cg_data: Dict, mapping_dict: Dict,
+                        output_dir: str = ".", filename: str = "cg_bead_info.txt"):
+    """
+    导出 CG bead 信息文件。
+
+    格式: bead_id mol_id bead_type mass
+
+    Args:
+        cg_data: CG数据字典，包含 ids, mol_ids, types
+        mapping_dict: 映射字典，包含 aa_masses
+        output_dir: 输出目录
+        filename: 输出文件名
+    """
+    out_path = Path(output_dir) / filename
+
+    with open(out_path, 'w') as f:
+        f.write("# bead_id mol_id bead_type mass\n")
+        for i, bead_id in enumerate(cg_data['ids']):
+            mol_id = cg_data['mol_ids'][i]
+            bead_type = cg_data['types'][i]
+            # 计算bead总质量（AA原子质量之和）
+            bead_mass = np.sum(mapping_dict[bead_id]['aa_masses'])
+            f.write(f"{bead_id} {mol_id} {bead_type} {bead_mass:.6f}\n")
+
+    print(f"CG bead info 已导出: {out_path} ({len(cg_data['ids'])} beads)")
+
+
 def convert_data_to_cg(aa_data: Dict, mapping_csv: str,
                        cg_bonds_file: str = None,
                        cg_angles_file: str = None,
-                       cg_dihedrals_file: str = None) -> Tuple[Dict, Dict]:
+                       cg_dihedrals_file: str = None,
+                       derive_topology: bool = False,
+                       output_cg_topology_dir: str = None,
+                       export_bead_info: bool = True) -> Tuple[Dict, Dict]:
     """
     将AA data转换为CG data。
 
     Args:
         aa_data: 从read_lammps_data()获取的AA数据
         mapping_csv: CG映射CSV文件路径
-        cg_bonds_file: CG键文件路径（可选）
+        cg_bonds_file: CG键文件路径（可选，优先使用）
         cg_angles_file: CG角度文件路径（可选）
         cg_dihedrals_file: CG二面角文件路径（可选）
+        derive_topology: 是否从AA data + mapping自动推导CG拓扑
+        output_cg_topology_dir: 导出推导的CG拓扑到文件（仅在derive_topology=True时有效）
+        export_bead_info: 是否导出cg_bead_info.txt（当output_cg_topology_dir存在时自动导出）
 
     Returns:
         (cg_data, mapping_dict): CG数据字典和映射字典
@@ -248,25 +364,41 @@ def convert_data_to_cg(aa_data: Dict, mapping_csv: str,
         box=aa_data['box']
     )
 
-    # 加载CG拓扑（如果提供）
+    # 加载或推导 CG 拓扑
     cg_bonds = None
     cg_angles = None
     cg_dihedrals = None
 
     if cg_bonds_file and Path(cg_bonds_file).exists():
+        # 优先级1: 显式文件路径
+        print(f"从文件加载 CG topology: {cg_bonds_file}")
         cg_bonds = np.loadtxt(cg_bonds_file, dtype=int)
         if cg_bonds.ndim == 1:
             cg_bonds = cg_bonds.reshape(1, -1)
 
-    if cg_angles_file and Path(cg_angles_file).exists():
-        cg_angles = np.loadtxt(cg_angles_file, dtype=int)
-        if cg_angles.ndim == 1:
-            cg_angles = cg_angles.reshape(1, -1)
+        if cg_angles_file and Path(cg_angles_file).exists():
+            cg_angles = np.loadtxt(cg_angles_file, dtype=int)
+            if cg_angles.ndim == 1:
+                cg_angles = cg_angles.reshape(1, -1)
 
-    if cg_dihedrals_file and Path(cg_dihedrals_file).exists():
-        cg_dihedrals = np.loadtxt(cg_dihedrals_file, dtype=int)
-        if cg_dihedrals.ndim == 1:
-            cg_dihedrals = cg_dihedrals.reshape(1, -1)
+        if cg_dihedrals_file and Path(cg_dihedrals_file).exists():
+            cg_dihedrals = np.loadtxt(cg_dihedrals_file, dtype=int)
+            if cg_dihedrals.ndim == 1:
+                cg_dihedrals = cg_dihedrals.reshape(1, -1)
+    elif derive_topology:
+        # 优先级2: 自动推导
+        print("从 AA bonds + mapping 推导 CG topology...")
+        cg_bonds, cg_angles, cg_dihedrals = derive_cg_topology(aa_data, mapping_csv)
+        print(f"  CG bonds: {len(cg_bonds)}, angles: {len(cg_angles)}, dihedrals: {len(cg_dihedrals)}")
+
+        # 可选: 导出推导的拓扑
+        if output_cg_topology_dir:
+            export_cg_topology(cg_bonds, cg_angles, cg_dihedrals,
+                               output_dir=output_cg_topology_dir)
+            # 自动导出 cg_bead_info.txt
+            if export_bead_info:
+                export_cg_bead_info(cg_data, mapping_dict,
+                                    output_dir=output_cg_topology_dir)
 
     cg_data['bonds'] = cg_bonds
     cg_data['angles'] = cg_angles
@@ -333,6 +465,73 @@ def unwrap_coords(ids: np.ndarray, types: np.ndarray, coords: np.ndarray,
                             unwrapped[neighbor_idx, dim] -= box_length[dim]
                         elif delta[dim] < -box_length[dim] / 2:
                             unwrapped[neighbor_idx, dim] += box_length[dim]
+
+    return unwrapped
+
+
+def unwrap_by_molecule(coords: np.ndarray, mol_ids: np.ndarray,
+                       ids: np.ndarray, box: np.ndarray) -> np.ndarray:
+    """
+    基于 mol_id 对分子坐标进行 unwrap（二次校正）。
+
+    用于处理原始 GRO 文件中分子已被 PBC wrap 分割的情况。
+    此函数在 unwrap_coords() 之后调用，确保同一分子内所有原子连续。
+
+    算法：
+    1. 按 mol_id 分组原子
+    2. 对每个 molecule：
+       a. 使用第一个原子作为参考点
+       b. 将所有原子展开到参考点附近（最小图像约定）
+       c. 计算分子质心
+       d. 以质心为基准重新展开所有原子
+
+    Args:
+        coords: 坐标数组 (natoms, 3)
+        mol_ids: 分子ID数组 (natoms,)
+        ids: 原子ID数组 (natoms,)
+        box: 盒子尺寸 (3, 2)
+
+    Returns:
+        解缠后的坐标数组 (natoms, 3)
+    """
+    box_length = box[:, 1] - box[:, 0]
+    unwrapped = coords.copy()
+
+    # 按 mol_id 分组
+    unique_mols = np.unique(mol_ids)
+
+    for mol_id in unique_mols:
+        # 获取该分子的所有原子索引
+        mol_mask = mol_ids == mol_id
+        mol_indices = np.where(mol_mask)[0]
+
+        if len(mol_indices) < 2:
+            # 单原子分子，无需处理
+            continue
+
+        mol_coords = coords[mol_indices]
+
+        # 步骤1：使用第一个原子作为参考点
+        ref = mol_coords[0]
+        delta = mol_coords - ref
+
+        # 步骤2：应用最小图像约定，将所有原子展开到参考点附近
+        for dim in range(3):
+            shift = np.round(delta[:, dim] / box_length[dim])
+            delta[:, dim] -= shift * box_length[dim]
+
+        unfolded = ref + delta
+
+        # 步骤3：计算分子质心
+        com = np.mean(unfolded, axis=0)
+
+        # 步骤4：以质心为基准重新展开所有原子
+        delta2 = coords[mol_indices] - com
+        for dim in range(3):
+            shift2 = np.round(delta2[:, dim] / box_length[dim])
+            delta2[:, dim] -= shift2 * box_length[dim]
+
+        unwrapped[mol_indices] = com + delta2
 
     return unwrapped
 

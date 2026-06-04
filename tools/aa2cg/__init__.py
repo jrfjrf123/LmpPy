@@ -5,6 +5,7 @@ AA2CG - 全原子到粗粒化转换工具
 - LAMMPS data文件转换
 - 轨迹文件转换（支持GROMACS TRR和LAMMPS dump）
 - CG映射工具函数
+- 性能优化版本（Numba JIT 加速）
 
 使用示例:
     from LmpPy.tools.aa2cg import (
@@ -13,7 +14,11 @@ AA2CG - 全原子到粗粒化转换工具
         read_lammps_data,
         write_cg_data_file,
         read_gromacs_trr_all_frames,
-        convert_trajectory_to_cg
+        convert_trajectory_to_cg,
+        # 优化版本
+        prepare_mapping_cache,
+        convert_aa_to_cg_frame_optimized,
+        convert_trajectory_to_cg_optimized
     )
 
     # 转换data文件
@@ -21,9 +26,9 @@ AA2CG - 全原子到粗粒化转换工具
     cg_data, mapping = convert_data_to_cg(aa_data, 'mapping.csv', 'cg_bonds.txt')
     write_cg_data_file('cg.data', cg_data, cg_data['bonds'])
 
-    # 转换轨迹
+    # 转换轨迹（优化版）
     aa_frames = read_gromacs_trr_all_frames('topol.tpr', 'traj.trr')
-    cg_traj = convert_trajectory_to_cg(aa_frames, 'mapping.csv')
+    cg_traj = convert_trajectory_to_cg_optimized(aa_frames, 'mapping.csv')
     save_cg_trajectory_pickle(cg_traj, 'cg_trajectory.pkl')
 """
 
@@ -33,7 +38,11 @@ from .mapping_utils import (
     convert_aa_to_cg_frame,
     pbc_distance,
     wrap_coords,
-    calculate_com
+    calculate_com,
+    # 性能优化版本
+    prepare_mapping_cache,
+    convert_aa_to_cg_frame_optimized,
+    NUMBA_AVAILABLE
 )
 
 # Data文件转换
@@ -41,7 +50,10 @@ from .data_converter import (
     read_lammps_data,
     write_cg_data_file,
     convert_data_to_cg,
-    unwrap_coords
+    unwrap_coords,
+    unwrap_by_molecule,
+    derive_cg_topology,
+    export_cg_topology
 )
 
 # 轨迹转换
@@ -50,6 +62,7 @@ from .trj_converter import (
     read_gromacs_trr,
     read_gromacs_trr_all_frames,
     convert_trajectory_to_cg,
+    convert_trajectory_to_cg_optimized,
     save_cg_trajectory_pickle,
     load_cg_trajectory_pickle,
     write_frame_to_xyz,
@@ -64,17 +77,26 @@ __all__ = [
     'wrap_coords',
     'calculate_com',
 
+    # 性能优化版本
+    'prepare_mapping_cache',
+    'convert_aa_to_cg_frame_optimized',
+    'NUMBA_AVAILABLE',
+
     # Data转换
     'read_lammps_data',
     'write_cg_data_file',
     'convert_data_to_cg',
     'unwrap_coords',
+    'unwrap_by_molecule',
+    'derive_cg_topology',
+    'export_cg_topology',
 
     # 轨迹转换
     'read_lammps_dump',
     'read_gromacs_trr',
     'read_gromacs_trr_all_frames',
     'convert_trajectory_to_cg',
+    'convert_trajectory_to_cg_optimized',
     'save_cg_trajectory_pickle',
     'load_cg_trajectory_pickle',
     'write_frame_to_xyz',

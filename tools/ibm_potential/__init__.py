@@ -88,6 +88,22 @@ try:
 except ImportError:
     pass
 
+# 可选：GROMACS 加载模块
+try:
+    from .gromacs_loader import (
+        TrajectoryCache,
+        TopologyIndex,
+        create_exclusion_mask,
+        calculate_bond_distribution_vectorized,
+        calculate_angle_distribution_vectorized,
+        calculate_dihedral_distribution_vectorized,
+        calculate_rdf_vectorized,
+        calculate_all_distributions_from_gromacs
+    )
+    HAS_GROMACS_SUPPORT = True
+except ImportError:
+    HAS_GROMACS_SUPPORT = False
+
 __all__ = [
     # 配置
     'IBMConfig',
@@ -126,4 +142,15 @@ __all__ = [
     'plot_single_distribution',
     'plot_all_distributions',
     'plot_distribution_results',
+
+    # GROMACS 支持（可选）
+    'TrajectoryCache',
+    'TopologyIndex',
+    'create_exclusion_mask',
+    'calculate_bond_distribution_vectorized',
+    'calculate_angle_distribution_vectorized',
+    'calculate_dihedral_distribution_vectorized',
+    'calculate_rdf_vectorized',
+    'calculate_all_distributions_from_gromacs',
+    'HAS_GROMACS_SUPPORT',
 ]

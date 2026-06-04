@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from core import (
     # 配置
     ConfigLoader, SystemConfig, LAMMPSParams,
+    ConfigValidator, ValidationResult, validate_config,
     # 映射
     MappingGenerator, CGCompareList, generate_cg_compare_list,
     # 模板
@@ -55,7 +56,6 @@ from core import (
     CGMapper, CGMapping,
     CGConverter, lammpstrj2cg,
     CGBondMapper, atom_bonds_to_cg_bonds,
-    BondsRecorder, save_bonds_record,
 )
 from utils import (
     wrap_coordinates,
@@ -108,20 +108,17 @@ class LAMMPSReactionRunner:
         # 初始化状态 (必须在 _load_configs 之前)
         self.cg_compare_list = None
         self.reacted_nums = {}
-        self.changed_bead_id_list = {}
 
         # 反应帧缓存（高效：列表动态添加，结束后转 npz）
+        # 注：cg_bonds 可由 aa_bonds + cg_mapping 推导，不再存储
+        # aa_ids/aa_types 在模拟中不变，从 cg_mapping 获取
         self.reaction_frames = {
             'aa_coords_before': [],    # 全原子坐标（反应前）
             'aa_coords_after': [],     # 全原子坐标（反应后）
-            'aa_ids': [],              # 原子 ID
-            'aa_types': [],            # 原子类型
             'aa_bonds_before': [],     # 原子键（反应前）
             'aa_bonds_after': [],      # 原子键（反应后）
             'cg_mapping_before': [],   # CG mapping（反应前）
             'cg_mapping_after': [],    # CG mapping（反应后）
-            'cg_bonds_before': [],     # CG 键（反应前）
-            'cg_bonds_after': [],      # CG 键（反应后）
             'timestep': [],            # 时间步
         }
 
@@ -133,43 +130,51 @@ class LAMMPSReactionRunner:
 
     def _load_configs(self):
         """加载所有配置"""
-        print("=" * 60)
-        print("加载配置文件...")
-        print("=" * 60)
+        if me == 0:
+            print("=" * 60)
+            print("加载配置文件...")
+            print("=" * 60)
 
         loader = ConfigLoader(str(self.config_dir))
 
         # 加载系统配置
         self.system_config = loader.load_system_config()
-        print(f"  体系名称: {self.system_config.name}")
+        if me == 0:
+            print(f"  体系名称: {self.system_config.name}")
 
         # 加载LAMMPS参数
         self.lammps_params = loader.load_lammps_params()
-        print(f"  循环次数: {self.lammps_params.loop_num}")
+        if me == 0:
+            print(f"  循环次数: {self.lammps_params.loop_num}")
 
         # 加载质量列表 (传入 data_file 用于自动提取)
         self.mass_list = loader.load_mass_list(self.lammps_params.data_file)
-        print(f"  原子类型数: {len(self.mass_list)}")
+        if me == 0:
+            print(f"  原子类型数: {len(self.mass_list)}")
 
         # 加载反应模板
         reaction_dir = self.config_dir / "reactions"
         if reaction_dir.exists():
             self.reaction_templates = load_all_reaction_templates(reaction_dir)
-            print(f"  反应模板数: {len(self.reaction_templates)}")
+            if me == 0:
+                print(f"  反应模板数: {len(self.reaction_templates)}")
         else:
             self.reaction_templates = {}
-            print("  反应模板数: 0 (未找到reactions目录)")
+            if me == 0:
+                print("  反应模板数: 0 (未找到reactions目录)")
 
         # CG映射：优先加载已有文件，否则生成
         cg_mapping_path = self.config_dir / self.lammps_params.initial_cg_mapping
         if cg_mapping_path.exists():
             self.cg_compare_list = CGCompareList.from_csv(str(cg_mapping_path))
-            print(f"  加载已有CG映射: {self.lammps_params.initial_cg_mapping}")
+            if me == 0:
+                print(f"  加载已有CG映射: {self.lammps_params.initial_cg_mapping}")
         else:
             self.cg_compare_list = generate_cg_compare_list(
                 self.system_config, self.config_dir
             )
-        print(f"  CG映射原子数: {len(self.cg_compare_list.data)}")
+        if me == 0:
+            print(f"  CG映射原子数: {len(self.cg_compare_list.data)}")
 
     def _init_components(self):
         """初始化组件"""
@@ -178,11 +183,6 @@ class LAMMPSReactionRunner:
 
         # CG转换器
         self.cg_converter = CGConverter()
-
-        # 键连表记录器
-        self.bonds_recorder = BondsRecorder(
-            output_dir=str(self.config_dir / "bonds_records")
-        )
 
         # 初始化反应计数
         for rxn in self.lammps_params.reactions:
@@ -254,8 +254,10 @@ class LAMMPSReactionRunner:
             cached = None
 
         for i in range(params.loop_num):
-            if i % 1000 == 0 and me == 0:
+            if me == 0:
                 print(f"  循环进度: {i}/{params.loop_num}")
+                import time as _lt
+                _t_loop_start = _lt.time()
 
             # Step 1: 运行 bond/react
             self._run_bond_react(lmp, params)
@@ -307,40 +309,52 @@ class LAMMPSReactionRunner:
                     )
 
                     # 键变化检测
-                    bond_changes = self._detect_bond_changes(cached['bonds'], bond_data_after.bonds)
+                    bond_changes = self._detect_bond_changes(cached['bonds'], bond_data_after.bonds, len(cached['ids']))
 
                     # 保存 CG mapping（反应前）
                     cg_mapping_before = self.cg_compare_list.data.copy()
 
                     # 更新 CG 映射 (如果有键变化)
+                    matched_reaction_names = []
                     if bond_changes.has_changes:
-                        self._update_cg_mapping(
+                        import time as _t
+                        _t_match_total_start = _t.time()
+                        _, matched_reaction_names = self._update_cg_mapping(
                             cached['bonds'],
                             bond_data_after.bonds,
+                            cached['types'],
                             atom_data_after.types,
+                            cached['ids'],
+                            atom_data_after.ids,
                             len(atom_data_after.ids)
                         )
+                        _t_match_total_elapsed = _t.time() - _t_match_total_start
+                        # print(f"  [DEBUG] match 阶段总计: {_t_match_total_elapsed*1000:.1f} ms")
 
                     # 保存 CG mapping（反应后，如果更新成功则与 before 不同）
+                    _t_post_start = _t.time()
+                    _t_cg_copy_start = _t_post_start
                     cg_mapping_after = self.cg_compare_list.data.copy()
+                    _t_cg_copy_end = _t.time()
 
                     # CG 转换 (反应后)
                     cg_coords_after, cg_ixyz_after = self._compute_cg_coords(
                         atom_data_after.ids, atom_data_after.types,
                         atom_data_after.coords, bond_data_after.bonds, box
                     )
+                    _t_cg_coord = _t.time() - _t_cg_copy_end
 
                     # 帧2: 反应后
                     self._write_cg_frame(
                         output_cg_traj, timestep, box, cg_coords_after, cg_ixyz_after
                     )
+                    _t_write_frame = _t.time() - (_t_cg_copy_end + _t_cg_coord)
 
                     # === 缓存反应帧数据 ===
                     # 1. 全原子数据
+                    # 注：aa_ids/aa_types 从 cg_mapping 获取，cg_bonds 由 aa_bonds+cg_mapping 推导
                     self.reaction_frames['aa_coords_before'].append(cached['coords'].copy())
                     self.reaction_frames['aa_coords_after'].append(atom_data_after.coords.copy())
-                    self.reaction_frames['aa_ids'].append(cached['ids'].copy())
-                    self.reaction_frames['aa_types'].append(cached['types'].copy())
                     self.reaction_frames['aa_bonds_before'].append(cached['bonds'].copy())
                     self.reaction_frames['aa_bonds_after'].append(bond_data_after.bonds.copy())
 
@@ -348,25 +362,11 @@ class LAMMPSReactionRunner:
                     self.reaction_frames['cg_mapping_before'].append(cg_mapping_before)
                     self.reaction_frames['cg_mapping_after'].append(cg_mapping_after)
 
-                    # 3. CG 键连信息
-                    cg_bonds_before = atom_bonds_to_cg_bonds(cached['bonds'], self.cg_compare_list.data)
-                    cg_bonds_after = atom_bonds_to_cg_bonds(bond_data_after.bonds, self.cg_compare_list.data)
-                    self.reaction_frames['cg_bonds_before'].append(cg_bonds_before)
-                    self.reaction_frames['cg_bonds_after'].append(cg_bonds_after)
-
-                    # 4. 时间步
+                    # 3. 时间步
                     self.reaction_frames['timestep'].append(timestep)
 
-                    # 记录键变化
-                    self.bonds_recorder.record(
-                        timestep=timestep,
-                        run_step=i,
-                        bonds_before=cached['bonds'],
-                        bonds_after=bond_data_after.bonds,
-                        reaction_type="unknown"
-                    )
-
                     # 更新全部缓存
+                    _t_cache_start = _t.time()
                     cached = {
                         'ids': atom_data_after.ids.copy(),
                         'types': atom_data_after.types.copy(),
@@ -379,6 +379,16 @@ class LAMMPSReactionRunner:
 
                     # 标记缓存有效
                     self.data_extractor._cache_valid = True
+
+                    _t_post_total = _t.time() - _t_post_start
+                    _t_cg_copy = _t_cg_copy_end - _t_cg_copy_start
+                    _t_cache = _t_post_total - _t_cg_copy - _t_cg_coord - _t_write_frame - _t_bonds - _t_rec
+                    # print(f"  [DEBUG] match后处理细分: cg_copy={_t_cg_copy*1000:.1f}ms, "
+                    #       f"coord_calc={_t_cg_coord*1000:.1f}ms, "
+                    #       f"write_frame={_t_write_frame*1000:.1f}ms, "
+                    #       f"cg_bonds={_t_bonds*1000:.1f}ms, "
+                    #       f"bonds_record={_t_rec*1000:.1f}ms, "
+                    #       f"cache_update={_t_cache*1000:.1f}ms")
 
             # 无反应时不需要更新 coords/ixyz，松弛后再更新
 
@@ -395,6 +405,10 @@ class LAMMPSReactionRunner:
 
             # 同步 (所有进程都需要调用 Barrier)
             MPI.COMM_WORLD.Barrier()
+
+            if me == 0:
+                _t_loop_elapsed = _lt.time() - _t_loop_start
+                # print(f"  [DEBUG] Loop {i} 总计: {_t_loop_elapsed*1000:.1f} ms")
 
         # 收尾
         self._finalize(lmp, f_react_num, output_cg_traj, t1)
@@ -416,26 +430,40 @@ class LAMMPSReactionRunner:
         Returns:
             (cg_coords, cg_ixyz): CG 坐标和 image flags
         """
+        import time as _ct
         # 展开坐标
+        _t0 = _ct.time()
         molecule_ids = find_molecules(bonds, len(ids))
+        _t1 = _ct.time()
         unwrapped_coords = self._unwrap_coords(coords, bonds, molecule_ids, box)
+        _t2 = _ct.time()
 
         # 构建 dump 格式数据
         dump_data = np.column_stack([
             ids, types, unwrapped_coords,
             np.zeros((len(ids), 3), dtype=np.int32)
         ])
+        _t3 = _ct.time()
 
         # CG 转换
         cg_coords = lammpstrj2cg(
             dump_data, self.cg_compare_list.data, self.mass_list, self.cg_converter
         )
+        _t4 = _ct.time()
 
         # Wrap 坐标
         wrapped_coords, cg_ixyz = wrap_coordinates(
             cg_coords[:, 2:5], box, return_images=True
         )
         cg_coords[:, 2:5] = wrapped_coords
+
+        _t5 = _ct.time()
+        # print(f"  [DEBUG] _compute_cg_coords 细分: "
+        #       f"find_mol={(_t1-_t0)*1000:.1f}ms, "
+        #       f"unwrap={(_t2-_t1)*1000:.1f}ms, "
+        #       f"stack={(_t3-_t2)*1000:.1f}ms, "
+        #       f"lammpstrj2cg={(_t4-_t3)*1000:.1f}ms, "
+        #       f"wrap={(_t5-_t4)*1000:.1f}ms")
 
         return cg_coords, cg_ixyz
 
@@ -458,24 +486,22 @@ class LAMMPSReactionRunner:
             cg_ixyz
         )
 
-    def _detect_bond_changes(self, bonds_before, bonds_after):
+    def _detect_bond_changes(self, bonds_before, bonds_after, n_atoms):
         """
         检测键变化
 
         Args:
             bonds_before: 反应前键连表
             bonds_after: 反应后键连表
+            n_atoms: 体系粒子总数
 
         Returns:
             BondChanges: 键变化结果
         """
-        n_atoms = len(self.mass_list) if hasattr(self, 'mass_list') else max(
-            bonds_before[:, 1:3].max(), bonds_after[:, 1:3].max()
-        )
         detector = BondDetector(n_atoms)
         return detector.detect(bonds_before, bonds_after)
 
-    def _update_cg_mapping(self, bonds_before, bonds_after, types_after, n_atoms):
+    def _update_cg_mapping(self, bonds_before, bonds_after, types_before, types_after, ids_before, ids_after, n_atoms):
         """
         更新 CG 映射
 
@@ -485,61 +511,101 @@ class LAMMPSReactionRunner:
         Args:
             bonds_before: 反应前键连表 (n_bonds, 3)
             bonds_after: 反应后键连表 (n_bonds, 3)
-            types_after: 反应后原子类型 (n_atoms,)
+            types_before: 反应前原子类型 (gather_atoms 返回的原始顺序)
+            types_after: 反应后原子类型
+            ids_before: 反应前原子ID (与 types_before 同序)
+            ids_after: 反应后原子ID
             n_atoms: 原子总数
 
         Returns:
-            bool: 是否成功更新
+            Tuple[bool, List[str]]: (是否成功更新CG映射, 匹配到的反应名称列表)
+                - (False, []): 更新失败（无模板、无匹配或异常）
+                - (True, ['rxn1_EEE', ...]): 更新成功，返回匹配到的反应名称
         """
         # 检查是否有反应模板
         if not self.reaction_templates:
-            return False
+            print("警告: 无反应模板，无法更新CG映射")
+            return False, []
 
         try:
-            # 使用 ReactionLocator 定位反应
+            import time as _time
+
+            # === 阶段计时：ReactionLocator ===
+            _t_loc_start = _time.time()
+            # 使用 ReactionLocator 定位反应 (pre-before + post-after 双重匹配)
             locator = ReactionLocator(self.reaction_templates)
             matches = locator.locate(
-                bonds_before, bonds_after, types_after, n_atoms
+                bonds_before, bonds_after, types_before, types_after,
+                ids_before, ids_after, n_atoms
             )
+            _t_loc_elapsed = _time.time() - _t_loc_start
+            # print(f"  locate 耗时: {_t_loc_elapsed*1000:.1f} ms, 返回 {len(matches)} 个 match")
 
             if not matches:
-                return False
+                if me == 0:
+                    print("警告: 未匹配到任何反应模板，CG映射未更新 (键变化存在但模板不匹配)")
+                return False, []
 
+            # === 阶段计时：CGMapper ===
+            _t_map_start = _time.time()
             # 转换 cg_compare_list 为 CGMapping
+            _t_from = _time.time()
             cg_mapping = CGMapping.from_cg_compare_list(
                 self.cg_compare_list.data, n_atoms
             )
+            _t_from_e = _time.time() - _t_from
 
             # 使用 CGMapper 更新
+            _t_batch = _time.time()
             mapper = CGMapper()
             updated_mapping = mapper.batch_update(
                 cg_mapping, matches, self.reaction_templates
             )
+            _t_batch_e = _time.time() - _t_batch
 
             # 转换回 cg_compare_list 格式
-            # 需要保留原有的 mol_id 和 mass
-            old_data = self.cg_compare_list.data
+            _t_to = _time.time()
             new_data = updated_mapping.to_cg_compare_list()
+            _t_to_e = _time.time() - _t_to
 
             # 保留 mol_id 和 mass（to_cg_compare_list 会生成默认值）
             # new_data 格式: [bead_id, mol_id, bead_type, AA_id, mass]
             # 我们需要更新 bead_id 和 bead_type，保留 mol_id 和 mass
-            for i in range(len(old_data)):
-                atom_id = int(old_data[i, 3])  # AA_id
-                # 找到新 mapping 中对应的行
-                new_row_mask = new_data[:, 3] == atom_id
-                if np.any(new_row_mask):
-                    new_idx = np.where(new_row_mask)[0][0]
-                    # 更新 bead_id 和 bead_type
-                    old_data[i, 0] = new_data[new_idx, 0]  # bead_id
-                    old_data[i, 2] = new_data[new_idx, 2]  # bead_type
+            old_data = self.cg_compare_list.data
+            _t_sync = _time.time()
+
+            # 向量化: 用 AA_id 建立 lookup 表
+            # new_data 和 old_data 的 AA_id 值范围相同，都是 1-based 整数
+            aa_ids_new = new_data[:, 3].astype(np.int32)  # AA_id 列
+            max_id = int(aa_ids_new.max())
+            # 建立 AA_id → index 映射
+            aa_id_to_idx = np.full(max_id + 1, -1, dtype=np.int32)
+            aa_id_to_idx[aa_ids_new] = np.arange(len(new_data), dtype=np.int32)
+            # 用 old_data 的 AA_id 查找对应的新索引
+            old_aa_ids = old_data[:, 3].astype(np.int32)
+            new_indices = aa_id_to_idx[old_aa_ids]
+            valid_mask = new_indices >= 0
+            # 批量更新 bead_id 和 bead_type
+            old_data[valid_mask, 0] = new_data[new_indices[valid_mask], 0]  # bead_id
+            old_data[valid_mask, 2] = new_data[new_indices[valid_mask], 2]  # bead_type
+
+            _t_sync_e = _time.time() - _t_sync
 
             self.cg_compare_list.data = old_data
-            return True
+            _t_map_elapsed = _time.time() - _t_map_start
+            # print(f"  CGMapper 细分: from_cg={_t_from_e*1000:.1f}ms, "
+            #       f"batch_update={_t_batch_e*1000:.1f}ms, "
+            #       f"to_cg_list={_t_to_e*1000:.1f}ms, "
+            #       f"sync_old_data={_t_sync_e*1000:.1f}ms, "
+            #       f"总计={_t_map_elapsed*1000:.1f}ms")
+            # print(f"  match 阶段总计: {(_t_loc_elapsed + _t_map_elapsed)*1000:.1f} ms\n")
+            return True, [m.reaction_name for m in matches]
 
         except Exception as e:
-            print(f"警告: CG 映射更新失败: {e}")
-            return False
+            print(f"警告: CG 映射更新失败 (异常): {e}")
+            import traceback
+            traceback.print_exc()
+            return False, []
 
     def _init_lammps(self):
         """初始化LAMMPS实例"""
@@ -556,7 +622,8 @@ class LAMMPSReactionRunner:
             lmp.command("log none")
         else:
             # 使用内置初始化命令
-            print("  使用内置LAMMPS初始化...")
+            if me == 0:
+                print("  使用内置LAMMPS初始化...")
 
             # 1. 基本设置
             lmp.command(f"units {LAMMPS_UNITS}")
@@ -581,7 +648,8 @@ class LAMMPSReactionRunner:
                 f"extra/angle/per/atom {extra.angle_per_atom} "
                 f"extra/dihedral/per/atom {extra.dihedral_per_atom}"
             )
-            print(f"    读取数据文件: {params.data_file}")
+            if me == 0:
+                print(f"    读取数据文件: {params.data_file}")
             lmp.command(read_data_cmd)
 
             # 4. 邻居列表设置
@@ -592,17 +660,20 @@ class LAMMPSReactionRunner:
 
             lmp.command("log none")
 
-        # 加载分子模板 (从lammps_params.yaml的molecules配置)
-        if params.molecules:
-            print(f"  加载分子模板: {len(params.molecules)} 个")
-            for mol_name, mol_file in params.molecules.items():
-                # 解析文件路径 (支持相对路径)
-                mol_path = self.config_dir / mol_file
-                if not mol_path.exists():
-                    print(f"    警告: 分子模板文件不存在: {mol_path}")
-                    continue
-                lmp.command(f"molecule {mol_name} {mol_path}")
-                print(f"    加载: {mol_name} <- {mol_file}")
+        # 加载分子模板 (从 reactions 配置中获取完整路径)
+        if params.reactions:
+            if me == 0:
+                print(f"  加载分子模板: {len(params.reactions)} 对 (来自 reactions 配置)")
+            for rxn in params.reactions:
+                # 使用 reactions 配置中的完整路径
+                if rxn.pre_template:
+                    lmp.command(f"molecule {rxn.pre_mol} {rxn.pre_template}")
+                    if me == 0:
+                        print(f"    加载: {rxn.pre_mol} <- {rxn.pre_template}")
+                if rxn.post_template:
+                    lmp.command(f"molecule {rxn.post_mol} {rxn.post_template}")
+                    if me == 0:
+                        print(f"    加载: {rxn.post_mol} <- {rxn.post_template}")
 
         # 设置速度
         velocity_seed = np.random.randint(10, 10000)
@@ -721,10 +792,6 @@ class LAMMPSReactionRunner:
         lmp.command("write_data final_frame.data pair ij nofix")
 
         if me == 0:
-            # 保存changed_bead_id_list
-            with open("changed_bead_id_list.pkl", "wb") as f:
-                pickle.dump(self.changed_bead_id_list, f)
-
             f_react_num.close()
 
             # 保存最终CG映射
@@ -732,7 +799,7 @@ class LAMMPSReactionRunner:
                 "final_cg_compare_list.csv",
                 self.cg_compare_list.data,
                 delimiter=",",
-                fmt="%d",
+                fmt="%.0f,%.0f,%.0f,%.0f,%.6f",
                 header="bead_id, mol_id, bead_type, AA_id, mass",
                 comments=''
             )
@@ -747,12 +814,9 @@ class LAMMPSReactionRunner:
             for name, num in self.reacted_nums.items():
                 print(f"    {name}: {num}")
 
-            # 保存键连表记录
-            if self.bonds_recorder.n_records > 0:
-                paths = self.bonds_recorder.save_all()
-                print(f"  键连表记录: {len(paths)} 个文件")
-
             # 批量输出反应帧数据
+            # 注：cg_bonds 由后处理从 aa_bonds + cg_mapping 推导，不再存储
+            # aa_ids/aa_types 从 cg_mapping 获取，不再重复存储
             n_reactions = len(self.reaction_frames['timestep'])
             if n_reactions > 0:
                 print(f"  反应帧数: {n_reactions}")
@@ -760,14 +824,10 @@ class LAMMPSReactionRunner:
                     'reaction_frames.npz',
                     aa_coords_before=np.array(self.reaction_frames['aa_coords_before']),
                     aa_coords_after=np.array(self.reaction_frames['aa_coords_after']),
-                    aa_ids=np.array(self.reaction_frames['aa_ids']),
-                    aa_types=np.array(self.reaction_frames['aa_types']),
                     aa_bonds_before=np.array(self.reaction_frames['aa_bonds_before'], dtype=object),
                     aa_bonds_after=np.array(self.reaction_frames['aa_bonds_after'], dtype=object),
                     cg_mapping_before=np.array(self.reaction_frames['cg_mapping_before']),
                     cg_mapping_after=np.array(self.reaction_frames['cg_mapping_after']),
-                    cg_bonds_before=np.array(self.reaction_frames['cg_bonds_before'], dtype=object),
-                    cg_bonds_after=np.array(self.reaction_frames['cg_bonds_after'], dtype=object),
                     timestep=np.array(self.reaction_frames['timestep']),
                 )
                 print(f"  反应帧数据已保存到: reaction_frames.npz")
@@ -777,7 +837,8 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description="LAMMPS反应模拟后处理 - 重构版")
     parser.add_argument("config_dir", help="配置文件目录")
-    parser.add_argument("--test", action="store_true", help="测试模式 (不运行LAMMPS)")
+    parser.add_argument("--test", action="store_true", help="测试模式 (不运行LAMMPS，执行完整配置验证)")
+    parser.add_argument("--validate", action="store_true", help="仅执行配置验证")
     parser.add_argument("--loop-num", type=int, default=None,
                         help="覆盖循环次数 (用于快速测试)")
 
@@ -788,6 +849,17 @@ def main():
     if not config_dir.exists():
         print(f"错误: 配置目录不存在: {config_dir}")
         sys.exit(1)
+
+    # 仅验证模式
+    if args.validate:
+        if me == 0:
+            print("\n执行配置验证...")
+            result = validate_config(str(config_dir))
+            if result.passed:
+                sys.exit(0)
+            else:
+                sys.exit(1)
+        return
 
     # 创建运行器
     runner = LAMMPSReactionRunner(str(config_dir))
@@ -800,9 +872,25 @@ def main():
 
     if args.test or lammps is None:
         if me == 0:
-            print("\n测试模式: 仅加载配置，不运行模拟")
-            print("✅ 配置加载成功!")
+            print("\n测试模式: 执行完整配置验证")
+            print("=" * 80)
+            result = validate_config(str(config_dir))
+            if result.passed:
+                print("\n✅ 配置验证通过，可以运行模拟")
+                sys.exit(0)
+            else:
+                print("\n❌ 配置验证未通过，请修复后重新运行")
+                sys.exit(1)
         return
+
+    # 运行前快速验证（不输出报告）
+    if me == 0:
+        validator = ConfigValidator(str(config_dir))
+        result = validator.validate_all()
+        if not result.passed:
+            print("错误: 配置验证失败")
+            result.print_report()
+            sys.exit(1)
 
     # 运行
     runner.run()

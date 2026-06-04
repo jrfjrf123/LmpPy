@@ -129,13 +129,70 @@ def write_topology_file(output_file: str, topology: np.ndarray,
     print(f"写入 {topology_type} 文件: {output_file} ({len(df)} {topology_type}s)")
 
 
-def derive_cg_bonds_from_aa(aa_bonds: np.ndarray, aa_to_cg_mapping: Dict) -> np.ndarray:
+def assign_topology_types(topology_array: np.ndarray,
+                          bead_types: Dict[int, int],
+                          topology_kind: str) -> np.ndarray:
     """
-    从AA键推导CG键。
+    根据 bead type 组合分配拓扑类型 ID。
+
+    回环结构的 angle 和 dihedral 合并为同一类型：
+    - Bond: (1,2) 和 (2,1) 合并
+    - Angle: (1,1,2) 和 (2,1,1) 合并
+    - Dihedral: (1,1,2,2) 和 (2,2,1,1) 合并
+
+    Args:
+        topology_array: 拓扑数组 [type, bead1, bead2, ...]
+        bead_types: {bead_id: bead_type}
+        topology_kind: 'bond', 'angle', 'dihedral'
+
+    Returns:
+        更新 type 列后的拓扑数组
+    """
+    if len(topology_array) == 0:
+        return topology_array
+
+    # 收集所有 bead type 组合
+    type_combinations = {}
+    next_type_id = 1
+
+    for topo in topology_array:
+        bead_ids = topo[1:]  # 获取 bead IDs
+        bead_type_combo = tuple(bead_types.get(int(bid), 1) for bid in bead_ids)
+
+        # 规范化 bead type 组合
+        if topology_kind == 'bond':
+            # Bond: (1,2) 和 (2,1) 合并
+            bead_type_combo = tuple(sorted(bead_type_combo))
+        elif topology_kind == 'angle':
+            # Angle: 首尾对称合并
+            if bead_type_combo[0] > bead_type_combo[2]:
+                bead_type_combo = (bead_type_combo[2], bead_type_combo[1], bead_type_combo[0])
+        elif topology_kind == 'dihedral':
+            # Dihedral: 首尾对称合并
+            reversed_combo = (bead_type_combo[3], bead_type_combo[2], bead_type_combo[1], bead_type_combo[0])
+            if bead_type_combo > reversed_combo:
+                bead_type_combo = reversed_combo
+
+        # 分配 type ID
+        if bead_type_combo not in type_combinations:
+            type_combinations[bead_type_combo] = next_type_id
+            next_type_id += 1
+
+        topo[0] = type_combinations[bead_type_combo]
+
+    return topology_array
+
+
+def derive_cg_bonds_from_aa(aa_bonds: np.ndarray,
+                            aa_to_cg_mapping: Dict,
+                            bead_types: Optional[Dict[int, int]] = None) -> np.ndarray:
+    """
+    从AA键推导CG键，并根据 bead type 分配 bond type。
 
     Args:
         aa_bonds: AA键数组 [type, atom1, atom2]
         aa_to_cg_mapping: AA到CG的映射字典
+        bead_types: {bead_id: bead_type} 映射（可选，用于分配正确的 bond type）
 
     Returns:
         CG键数组 [type, bead1, bead2]
@@ -161,9 +218,14 @@ def derive_cg_bonds_from_aa(aa_bonds: np.ndarray, aa_to_cg_mapping: Dict) -> np.
     cg_bonds = list(set(map(tuple, cg_bonds)))
     cg_bonds = np.array(sorted(cg_bonds), dtype=np.int32)
 
-    # 重新分配类型
+    # 分配 bond type
     if len(cg_bonds) > 0:
-        cg_bonds[:, 0] = 1
+        if bead_types:
+            # 根据 bead type 组合分配正确的 bond type
+            cg_bonds = assign_topology_types(cg_bonds, bead_types, 'bond')
+        else:
+            # 兼容旧逻辑：所有 bond type 为 1
+            cg_bonds[:, 0] = 1
 
     return cg_bonds
 

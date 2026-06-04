@@ -43,7 +43,12 @@ from .report import generate_report
 def smooth_distribution(filepath: str,
                         output_dir: str,
                         temperature: float = DEFAULT_TEMPERATURE,
-                        verbose: bool = True) -> Tuple[str, Dict[str, Any]]:
+                        verbose: bool = True,
+                        input_dist_unit: str = 'A',
+                        input_ang_unit: str = 'deg',
+                        output_dist_unit: str = 'A',
+                        output_ang_unit: str = 'deg',
+                        threshold: float = 1e-8) -> Tuple[str, Dict[str, Any]]:
     """
     Main function to smooth a distribution file.
 
@@ -53,11 +58,21 @@ def smooth_distribution(filepath: str,
     - angle: harmonic boundary smoothing (same as bond)
     - dihedral: periodic Gaussian smoothing
 
+    Unit handling:
+    - Internal processing always uses Å (distance) and deg (angle).
+    - Input data is converted from the specified input units to internal units.
+    - Output data is converted from internal units to the specified output units.
+    - Both x and P are scaled to maintain ∫P(x)dx invariance.
+
     Args:
         filepath: Path to input distribution file
         output_dir: Directory for output files
         temperature: Temperature in Kelvin
         verbose: Whether to print progress information
+        input_dist_unit: Input distance unit, 'A' or 'nm' (default 'A')
+        input_ang_unit: Input angle unit, 'deg' or 'rad' (default 'deg')
+        output_dist_unit: Output distance unit, 'A' or 'nm' (default 'A')
+        output_ang_unit: Output angle unit, 'deg' or 'rad' (default 'deg')
 
     Returns:
         Tuple of (smoothed_file_path, result_dict)
@@ -73,6 +88,16 @@ def smooth_distribution(filepath: str,
         print("Step 1: Loading distribution data...")
     x, P, dist_type, dr = load_distribution(filepath)
     n_bins = len(x)
+
+    # Step 1.1: Convert input units to internal canonical units (Å / deg)
+    input_unit = input_dist_unit if dist_type in ('bond', 'rdf') else input_ang_unit
+    canonical_unit = 'A' if dist_type in ('bond', 'rdf') else 'deg'
+    if input_unit != canonical_unit:
+        if verbose:
+            print(f"  Converting input: {input_unit} → {canonical_unit}")
+        from .io import convert_distribution_units
+        x, P = convert_distribution_units(x, P, dist_type, input_unit, canonical_unit)
+        dr = x[1] - x[0] if len(x) > 1 else dr
 
     if verbose:
         print(f"  Type: {dist_type}")
@@ -273,9 +298,31 @@ def smooth_distribution(filepath: str,
         print("Step 10: Saving output files...")
 
     os.makedirs(output_dir, exist_ok=True)
-    basename = os.path.splitext(os.path.basename(filepath))[0]
-    # smoothed_path = os.path.join(output_dir, f'{basename}_smoothed.txt')
-    smoothed_path = os.path.join(output_dir, f'{basename}_dist.txt')
+    filename = os.path.basename(filepath)
+
+    # 统一输出为 .dist.tgt 格式（与 calc_dist.py 保持一致）
+    if filename.endswith('.dist.tgt'):
+        base = filename[:-len('.dist.tgt')]
+    elif filename.endswith('_dist.txt'):
+        base = filename[:-len('_dist.txt')]
+    else:
+        base = os.path.splitext(filename)[0]
+    smoothed_path = os.path.join(output_dir, f'{base}.dist.tgt')
+
+    # Step 9.5: Convert to output units before saving
+    output_unit = output_dist_unit if dist_type in ('bond', 'rdf') else output_ang_unit
+    if output_unit != canonical_unit:
+        if verbose:
+            print(f"  Converting output: {canonical_unit} → {output_unit}")
+        from .io import convert_distribution_units
+        x_out, P_out = convert_distribution_units(x, P_smooth, dist_type, canonical_unit, output_unit)
+    else:
+        x_out, P_out = x, P_smooth
+
+    # Apply threshold: zero out small values
+    if threshold > 0:
+        x_out = np.where(np.abs(x_out) < threshold, 0.0, x_out)
+        P_out = np.where(np.abs(P_out) < threshold, 0.0, P_out)
 
     # Write smoothed data
     with open(smoothed_path, 'w') as f:
@@ -283,9 +330,10 @@ def smooth_distribution(filepath: str,
         f.write(f"# Original file: {filepath}\n")
         f.write(f"# Method: {params.get('method', 'unknown')}\n")
         f.write(f"# Temperature: {temperature} K\n")
+        f.write(f"# Units: {output_unit}\n")
         f.write("# x P_smoothed\n")
-        for i in range(len(x)):
-            f.write(f"{x[i]:.6e} {P_smooth[i]:.6e}\n")
+        for i in range(len(x_out)):
+            f.write(f"{x_out[i]:.6e} {P_out[i]:.6e}\n")
 
     # Generate report
     plot_path, report_path = generate_report(
@@ -327,7 +375,12 @@ def smooth_all_distributions(input_dir: str,
                              output_dir: str,
                              dist_types: List[str] = None,
                              temperature: float = DEFAULT_TEMPERATURE,
-                             verbose: bool = True) -> Dict[str, Any]:
+                             verbose: bool = True,
+                             input_dist_unit: str = 'A',
+                             input_ang_unit: str = 'deg',
+                             output_dist_unit: str = 'A',
+                             output_ang_unit: str = 'deg',
+                             threshold: float = 1e-8) -> Dict[str, Any]:
     """
     Batch process all distribution files in a directory.
 
@@ -354,7 +407,7 @@ def smooth_all_distributions(input_dir: str,
     files_by_type = {'bond': [], 'angle': [], 'dihedral': [], 'rdf': []}
 
     for f in os.listdir(input_dir):
-        if not f.endswith('_dist.txt'):
+        if not (f.endswith('_dist.txt') or f.endswith('.dist.tgt')):
             continue
 
         filepath = os.path.join(input_dir, f)
@@ -387,7 +440,10 @@ def smooth_all_distributions(input_dir: str,
         for filepath in files:
             try:
                 smoothed_path, result = smooth_distribution(
-                    filepath, output_dir, temperature, verbose
+                    filepath, output_dir, temperature, verbose,
+                    input_dist_unit, input_ang_unit,
+                    output_dist_unit, output_ang_unit,
+                    threshold
                 )
                 results[filepath] = {'status': 'success', 'result': result}
                 total_success += 1
@@ -447,6 +503,18 @@ Examples:
     parser.add_argument('-q', '--quiet', action='store_true',
                        help='Suppress progress output')
 
+    # Unit options
+    parser.add_argument('--input-dist-unit', default='A', choices=['A', 'nm'],
+                        help='Input distance unit: A (Angstrom) or nm (default: A)')
+    parser.add_argument('--input-ang-unit', default='deg', choices=['deg', 'rad'],
+                        help='Input angle unit: deg or rad (default: deg)')
+    parser.add_argument('--output-dist-unit', default='A', choices=['A', 'nm'],
+                        help='Output distance unit: A (Angstrom) or nm (default: A)')
+    parser.add_argument('--output-ang-unit', default='deg', choices=['deg', 'rad'],
+                        help='Output angle unit: deg or rad (default: deg)')
+    parser.add_argument('-t', '--threshold', type=float, default=1e-8,
+                        help='Zero threshold for x and P values (default: 1e-8)')
+
     args = parser.parse_args()
 
     # Process type filter
@@ -470,7 +538,7 @@ Examples:
     if args.directory:
         if os.path.isdir(args.directory):
             for f in os.listdir(args.directory):
-                if f.endswith('_dist.txt'):
+                if f.endswith('_dist.txt') or f.endswith('.dist.tgt'):
                     input_files.append(os.path.join(args.directory, f))
         else:
             print(f"Error: Directory not found: {args.directory}")
@@ -503,7 +571,12 @@ Examples:
                 filepath=filepath,
                 output_dir=args.output,
                 temperature=args.temperature,
-                verbose=verbose
+                verbose=verbose,
+                input_dist_unit=args.input_dist_unit,
+                input_ang_unit=args.input_ang_unit,
+                output_dist_unit=args.output_dist_unit,
+                output_ang_unit=args.output_ang_unit,
+                threshold=args.threshold
             )
             results.append({'input': filepath, 'status': 'success', 'result': result})
             success_count += 1

@@ -636,7 +636,7 @@ def load_all_reaction_templates(reaction_dir: Path,
                     cg_info += f" (pre CG: {template.pre_cg_mapping.n_beads} beads)"
                 if template.post_cg_mapping:
                     cg_info += f" (post CG: {template.post_cg_mapping.n_beads} beads)"
-                print(f"已加载反应模板: {rxn_name}{cg_info}")
+                # print(f"已加载反应模板: {rxn_name}{cg_info}")
 
             except Exception as e:
                 print(f"警告: 加载反应模板 {rxn_name} 失败: {e}")
