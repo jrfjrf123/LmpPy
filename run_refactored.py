@@ -780,8 +780,22 @@ def main():
     parser.add_argument("--test", action="store_true", help="测试模式 (不运行LAMMPS)")
     parser.add_argument("--loop-num", type=int, default=None,
                         help="覆盖循环次数 (用于快速测试)")
+    parser.add_argument("--smoke-test", action="store_true",
+                        help="冒烟测试模式: 在临时目录中跑少量 loop 并验证输出")
 
     args = parser.parse_args()
+
+    # 冒烟测试模式: 委托给 SmokeTestHarness
+    if args.smoke_test:
+        from core.smoke_test_harness import SmokeTestHarness
+        harness = SmokeTestHarness(
+            args.config_dir,
+            loop_num=args.loop_num or 5,
+            keep_output=False
+        )
+        report = harness.run()
+        report.print()
+        sys.exit(0 if report.passed else 1)
 
     # 检查配置目录
     config_dir = Path(args.config_dir)
