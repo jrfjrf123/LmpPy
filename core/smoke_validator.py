@@ -213,6 +213,7 @@ class SmokeValidator:
             return
 
         details = []
+        b_passed = True  # 独立追踪 B 的通过状态
         try:
             cg_data = np.loadtxt(final_mapping_file, delimiter=',', skiprows=1, ndmin=2)
             details.append(f"{len(cg_data)} 个原子映射")
@@ -222,14 +223,14 @@ class SmokeValidator:
                 bead_id_to_type = validate_cg_mapping_consistency(cg_data, raise_error=True)
                 details.append(f"{len(bead_id_to_type)} 个 bead，每个 bead_type 唯一")
             except Exception as e:
-                report.passed = False
+                b_passed = False
                 details.append(f"一致性验证失败: {e}")
 
             # B2: AA_id 无重复检查
             aa_ids = cg_data[:, 3].astype(np.int32)
             unique_aa = len(np.unique(aa_ids))
             if unique_aa != len(aa_ids):
-                report.passed = False
+                b_passed = False
                 details.append(f"AA_id 存在重复: {len(aa_ids)} 行但只有 {unique_aa} 个唯一值")
 
             # B3: AA_id 不缺失检查 (如果提供了 n_atoms)
@@ -238,11 +239,11 @@ class SmokeValidator:
                 actual = set(aa_ids.tolist())
                 missing = expected - actual
                 if missing:
-                    report.passed = False
+                    b_passed = False
                     details.append(f"AA_id 缺失: {len(missing)} 个原子未被映射 (示例: {sorted(list(missing))[:5]}...)")
 
             SmokeValidator._record(report, "B. CG mapping 一致性",
-                                   "pass" if report.passed else "fail",
+                                   "pass" if b_passed else "fail",
                                    "\n".join(details))
         except Exception as e:
             report.passed = False
