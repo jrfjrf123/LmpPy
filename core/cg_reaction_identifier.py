@@ -58,8 +58,6 @@ def _trace_bead_chain(start_bead: int,
         next_bead = non_edge[0]
         chain.append(next_bead)
         visited.add(next_bead)
-        if next_bead in edge_bead_ids:
-            break
         current = next_bead
     return tuple(chain)
 
@@ -102,10 +100,14 @@ def load_template_signatures(reactions_dir: Path) -> Tuple[
         if not pre_yaml.exists() or not post_yaml.exists():
             continue
 
-        with open(pre_yaml, 'r') as f:
-            pre_data = yaml.safe_load(f.read().replace('\t', '  '))['mapping']
-        with open(post_yaml, 'r') as f:
-            post_data = yaml.safe_load(f.read().replace('\t', '  '))['mapping']
+        try:
+            with open(pre_yaml, 'r') as f:
+                pre_data = yaml.safe_load(f.read().replace('\t', '  '))['mapping']
+            with open(post_yaml, 'r') as f:
+                post_data = yaml.safe_load(f.read().replace('\t', '  '))['mapping']
+        except (yaml.YAMLError, TypeError, KeyError, ValueError) as e:
+            print(f"  警告: 解析 {rxn_name} 的 mapping YAML 失败: {e}")
+            continue
 
         # 2. 解析 .map → InitiatorIDs, EdgeIDs, Equivalences
         map_file = rxn_dir / f"{rxn_name}.map"
@@ -181,7 +183,12 @@ def load_template_signatures(reactions_dir: Path) -> Tuple[
         for b1, b2 in bead_bonds:
             degree[b1] += 1; degree[b2] += 1
 
-        first_new = list(new_bead_bonds)[0]
+        new_bead_bonds_list = list(new_bead_bonds)
+        if not new_bead_bonds_list:
+            continue
+        # 对于当前模板，每个反应仅创建一条 bead 间新键
+        # 若出现多条新键，仍取第一条推导签名（后续 chain 精筛会处理歧义）
+        first_new = new_bead_bonds_list[0]
         b_a, b_b = first_new
         deg_a, deg_b = degree.get(b_a, 0), degree.get(b_b, 0)
         if deg_a == 0 and deg_b > 0:
@@ -216,6 +223,7 @@ def load_template_signatures(reactions_dir: Path) -> Tuple[
             btype = pre_bead_types[bead_id]
             chain_bead_ids = _trace_bead_chain(bead_id, bead_bonds, edge_bead_ids)
             chain_types = tuple(pre_bead_types[bid] for bid in chain_bead_ids)
+            # 以 bead_type 为 key 进行去重——相同类型的 initiator 应有等价的链拓扑
             pre_chains[btype] = chain_types
 
         # 7. 构建 type_map
