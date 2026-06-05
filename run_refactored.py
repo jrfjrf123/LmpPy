@@ -869,7 +869,8 @@ def main():
             keep_output=False
         )
         report = harness.run()
-        report.print()
+        if report is not None:
+            report.print()
         sys.exit(0 if report.passed else 1)
 
     # 检查配置目录

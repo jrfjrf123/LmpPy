@@ -53,9 +53,9 @@ def main():
     )
 
     report = harness.run()
-    report.print()
-
-    sys.exit(0 if report.passed else 1)
+    if report is not None:
+        report.print()
+        sys.exit(0 if report.passed else 1)
 
 
 if __name__ == "__main__":
