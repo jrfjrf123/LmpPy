@@ -267,6 +267,162 @@ def load_template_signatures(reactions_dir: Path) -> Tuple[
     return (dict(signature_index), all_signatures, end_types, monomer_types, interior_types)
 
 
+def validate_chain(cg_graph_after: Dict[int, List[int]],
+                   start_bead: int,
+                   exclude_bead: int,
+                   expected_chain: Tuple[int, ...],
+                   bead_type_lut: Dict[int, int]) -> bool:
+    """
+    沿反应后 CG 键图验证类型链。
+
+    从 start_bead 出发，排除 exclude_bead，逐层比对邻居 bead_type 是否与
+    expected_chain 一致。expected_chain 为空时直接返回 True（孤立 initiator）。
+
+    Args:
+        cg_graph_after: 反应后 CG 键图 {bead_id: [neighbor_bead_ids]}
+        start_bead: 起始 bead (initiator)
+        exclude_bead: 排除的邻居 (新键对端)
+        expected_chain: 期望的 bead_type 序列
+        bead_type_lut: {bead_id: bead_type}
+
+    Returns:
+        是否匹配
+    """
+    if not expected_chain:
+        return True
+
+    current = start_bead
+    for expected_type in expected_chain:
+        neighbors = [n for n in cg_graph_after.get(current, [])
+                     if n != exclude_bead]
+        if not neighbors:
+            return False
+
+        found = False
+        for nb in neighbors:
+            if bead_type_lut.get(nb) == expected_type:
+                current = nb
+                exclude_bead = None
+                found = True
+                break
+        if not found:
+            return False
+
+    return True
+
+
+def match_reaction(new_bond: Tuple[int, int],
+                   bead_type_lut: Dict[int, int],
+                   cg_graph_after: Dict[int, List[int]],
+                   signature_index: Dict[Tuple[int, int, int], List[CGReactionSignature]],
+                   end_types: Set[int],
+                   monomer_types: Set[int]) -> Optional[CGReactionSignature]:
+    """
+    两级匹配：3-bead 粗筛 → [chain 精筛(按需)]。
+
+    阶段1: 从新 CG 键找 end/monomer → interior neighbor → 3-bead 签名查表。
+            唯一命中则直接返回。
+    阶段2: 多个候选时，用 validate_chain() 沿链验证甄别。
+            仍无法唯一确定 → MPI Abort / sys.exit(1)。
+
+    Args:
+        new_bond: 新 CG 键 (bead1, bead2)，已规范化 (小在前)
+        bead_type_lut: {bead_id: bead_type}
+        cg_graph_after: 反应后 CG 键图
+        signature_index: load_template_signatures() 返回的索引
+        end_types: 所有 end bead 类型
+        monomer_types: 所有 monomer bead 类型
+
+    Returns:
+        匹配的 CGReactionSignature 或 None
+
+    Raises:
+        SystemExit: 多个候选且 chain 精筛后仍无法唯一确定时终止进程
+    """
+    b1, b2 = new_bond
+    t1 = bead_type_lut.get(b1)
+    t2 = bead_type_lut.get(b2)
+    if t1 is None or t2 is None:
+        return None
+
+    # --- 阶段 1: 3-bead 粗筛 ---
+    # 区分 end/monomer
+    if t1 in end_types and t2 in monomer_types:
+        end_bead, monomer_bead = b1, b2
+        end_type, monomer_type = t1, t2
+    elif t2 in end_types and t1 in monomer_types:
+        end_bead, monomer_bead = b2, b1
+        end_type, monomer_type = t2, t1
+    else:
+        return None
+
+    # 找 interior neighbor (end_bead 在图中除 monomer 外的邻居)
+    interior_bead = None
+    interior_type = None
+    interior_types: Set[int] = {k[0] for k in signature_index.keys()}
+    for nb in cg_graph_after.get(end_bead, []):
+        if nb == monomer_bead:
+            continue
+        nb_type = bead_type_lut.get(nb)
+        if nb_type in interior_types:
+            interior_bead = nb
+            interior_type = nb_type
+            break
+
+    if interior_bead is None:
+        return None
+
+    # 查表
+    sig_3bead = (interior_type, end_type, monomer_type)
+    candidates = signature_index.get(sig_3bead, [])
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]    # 快速路径
+
+    # --- 阶段 2: chain 精筛 ---
+    matched = []
+    for sig in candidates:
+        if not validate_chain(cg_graph_after, end_bead, monomer_bead,
+                              sig.pre_chains.get(end_type, ()), bead_type_lut):
+            continue
+        if not validate_chain(cg_graph_after, monomer_bead, end_bead,
+                              sig.pre_chains.get(monomer_type, ()), bead_type_lut):
+            continue
+        matched.append(sig)
+
+    if len(matched) == 1:
+        return matched[0]
+
+    # 无法唯一匹配 → FATAL
+    try:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+    except ImportError:
+        comm = None
+
+    if comm is not None and comm.Get_size() > 1:
+        if comm.Get_rank() == 0:
+            print(f"FATAL: 无法唯一确定反应类型")
+            print(f"  新键: {new_bond}")
+            print(f"  3-bead 签名: {sig_3bead}")
+            for s in candidates:
+                print(f"  候选: {s.name}, pre_chains={s.pre_chains}")
+            if matched:
+                print(f"  chain 精筛后: {[s.name for s in matched]}")
+        comm.Abort(1)
+    else:
+        import sys
+        print(f"FATAL: 无法唯一确定反应类型")
+        print(f"  新键: {new_bond}")
+        print(f"  3-bead 签名: {sig_3bead}")
+        for s in candidates:
+            print(f"  候选: {s.name}, pre_chains={s.pre_chains}")
+        sys.exit(1)
+
+    return None  # unreachable
+
+
 # ============================================================
 # 步骤 1: 从模板 YAML 加载 3-bead 类型签名 (交叉验证)
 # ============================================================
