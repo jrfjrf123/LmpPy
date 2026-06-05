@@ -21,10 +21,243 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Set
 import numpy as np
 import yaml
+from dataclasses import dataclass, field
+
+
+@dataclass
+class CGReactionSignature:
+    """从模板提取的 CG 级反应签名（生产级，供 _update_cg_mapping 使用）"""
+    name: str                                    # "rxn1_EEE"
+    signature_3bead: Tuple[int, int, int]        # (interior_type, end_type, monomer_type)
+    pre_chains: Dict[int, Tuple[int, ...]]       # initiator_bead_type → 向外的类型链
+    type_map: Dict[int, int]                     # {old_bead_type: new_bead_type}
+    bead_id_map: Dict[int, int]                  # {old_local_bead_id: new_local_bead_id}，空=不变
+
+
+def _trace_bead_chain(start_bead: int,
+                      bead_bonds: Set[Tuple[int, int]],
+                      edge_bead_ids: Set[int]) -> Tuple[int, ...]:
+    """
+    从 start_bead 沿 bead_bonds 向外遍历直到 edge 或链端，返回途经 bead ID 序列。
+
+    模板初始化阶段使用。不包含 edge bead 本身。线性链假设：取第一个非 edge 邻居。
+    """
+    chain = []
+    current = start_bead
+    visited = {current}
+    while True:
+        neighbors = []
+        for b1, b2 in bead_bonds:
+            if b1 == current and b2 not in visited:
+                neighbors.append(b2)
+            elif b2 == current and b1 not in visited:
+                neighbors.append(b1)
+        non_edge = [n for n in neighbors if n not in edge_bead_ids]
+        if not non_edge:
+            break
+        next_bead = non_edge[0]
+        chain.append(next_bead)
+        visited.add(next_bead)
+        if next_bead in edge_bead_ids:
+            break
+        current = next_bead
+    return tuple(chain)
+
+
+def load_template_signatures(reactions_dir: Path) -> Tuple[
+        Dict[Tuple[int, int, int], List[CGReactionSignature]],
+        List[CGReactionSignature],
+        Set[int], Set[int], Set[int]
+]:
+    """
+    从 reactions/ 目录加载所有模板的 CG 级反应签名（生产级）。
+
+    与 load_reaction_signatures() 并存——后者供 smoke_validator 交叉验证使用。
+
+    Returns:
+        signature_index: {(interior_type, end_type, monomer_type): [CGReactionSignature, ...]}
+        all_signatures: 所有签名的列表
+        end_types: 所有 end bead 类型集合 (运行时区分 end/monomer)
+        monomer_types: 所有 monomer bead 类型集合
+    """
+    signature_index: Dict[Tuple[int, int, int], List[CGReactionSignature]] = defaultdict(list)
+    all_signatures: List[CGReactionSignature] = []
+    end_types: Set[int] = set()
+    monomer_types: Set[int] = set()
+
+    reactions_path = Path(reactions_dir)
+    if not reactions_path.exists() or not reactions_path.is_dir():
+        return dict(signature_index), all_signatures, end_types, monomer_types
+
+    for rxn_dir in sorted(reactions_path.iterdir()):
+        if not rxn_dir.is_dir():
+            continue
+        rxn_name = rxn_dir.name
+
+        # 1. 加载 pre/post mapping YAML
+        pre_yaml = rxn_dir / f"{rxn_name}_pre_mapping.yaml"
+        post_yaml = rxn_dir / f"{rxn_name}_post_mapping.yaml"
+        if not pre_yaml.exists() or not post_yaml.exists():
+            continue
+
+        with open(pre_yaml, 'r') as f:
+            pre_data = yaml.safe_load(f.read().replace('\t', '  '))['mapping']
+        with open(post_yaml, 'r') as f:
+            post_data = yaml.safe_load(f.read().replace('\t', '  '))['mapping']
+
+        # 2. 解析 .map → InitiatorIDs, EdgeIDs, Equivalences
+        map_file = rxn_dir / f"{rxn_name}.map"
+        initiator_ids, edge_ids, equivalences = [], [], {}
+        if map_file.exists():
+            with open(map_file, 'r') as f:
+                section = None
+                for line in f:
+                    line = line.strip()
+                    if line == 'InitiatorIDs': section = 'initiator'; continue
+                    elif line == 'EdgeIDs': section = 'edge'; continue
+                    elif line == 'Equivalences': section = 'equiv'; continue
+                    elif line.startswith('Constraints'): section = 'constraint'; continue
+                    if not line: continue
+                    if section == 'initiator': initiator_ids.append(int(line))
+                    elif section == 'edge': edge_ids.append(int(line))
+                    elif section == 'equiv':
+                        parts = line.split()
+                        if len(parts) >= 2: equivalences[int(parts[0])] = int(parts[1])
+
+        # 3. 原子→bead 映射 + pre bead 键连图
+        atom_to_bead: Dict[int, int] = {}
+        pre_bead_types: Dict[int, int] = {}
+        for bead_id_str, info in pre_data.items():
+            bid = int(bead_id_str)
+            pre_bead_types[bid] = info['bead_type']
+            for a in info['atoms']:
+                atom_to_bead[a] = bid
+
+        pre_template_file = rxn_dir / f"{rxn_name}_pre.lammpstemplate"
+        post_template_file = rxn_dir / f"{rxn_name}_post.lammpstemplate"
+        bead_bonds: Set[Tuple[int, int]] = set()
+        if pre_template_file.exists():
+            with open(pre_template_file, 'r') as f:
+                in_bonds = False
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('Bonds'): in_bonds = True; continue
+                    if in_bonds:
+                        if not line: continue
+                        if line.startswith('Angles') or line.startswith('Dihedrals'): break
+                        parts = line.split()
+                        if len(parts) >= 4:
+                            a1, a2 = int(parts[2]), int(parts[3])
+                            b1, b2 = atom_to_bead.get(a1), atom_to_bead.get(a2)
+                            if b1 is not None and b2 is not None and b1 != b2:
+                                bead_bonds.add((min(b1, b2), max(b1, b2)))
+
+        # 4. 找 post 新增 bead 键 → 确定 end/monomer
+        post_bead_bonds: Set[Tuple[int, int]] = set()
+        if post_template_file.exists():
+            with open(post_template_file, 'r') as f:
+                in_bonds = False
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('Bonds'): in_bonds = True; continue
+                    if in_bonds:
+                        if not line: continue
+                        if line.startswith('Angles') or line.startswith('Dihedrals'): break
+                        parts = line.split()
+                        if len(parts) >= 4:
+                            a1, a2 = int(parts[2]), int(parts[3])
+                            b1, b2 = atom_to_bead.get(a1), atom_to_bead.get(a2)
+                            if b1 is not None and b2 is not None and b1 != b2:
+                                post_bead_bonds.add((min(b1, b2), max(b1, b2)))
+
+        new_bead_bonds = post_bead_bonds - bead_bonds
+        if not new_bead_bonds:
+            continue
+
+        # 5. 从新增键推导 3-bead 签名
+        degree: Dict[int, int] = defaultdict(int)
+        for b1, b2 in bead_bonds:
+            degree[b1] += 1; degree[b2] += 1
+
+        first_new = list(new_bead_bonds)[0]
+        b_a, b_b = first_new
+        deg_a, deg_b = degree.get(b_a, 0), degree.get(b_b, 0)
+        if deg_a == 0 and deg_b > 0:
+            monomer_bead, end_bead = b_a, b_b
+        elif deg_b == 0 and deg_a > 0:
+            monomer_bead, end_bead = b_b, b_a
+        else:
+            if deg_a <= deg_b:
+                monomer_bead, end_bead = b_a, b_b
+            else:
+                monomer_bead, end_bead = b_b, b_a
+
+        interior_bead = None
+        for b1, b2 in bead_bonds:
+            if b1 == end_bead: interior_bead = b2; break
+            elif b2 == end_bead: interior_bead = b1; break
+        if interior_bead is None:
+            continue
+
+        interior_type = pre_bead_types[interior_bead]
+        end_type = pre_bead_types[end_bead]
+        monomer_type = pre_bead_types[monomer_bead]
+        sig_3bead = (interior_type, end_type, monomer_type)
+
+        # 6. 构建 pre_chains
+        edge_bead_ids = {atom_to_bead[e] for e in edge_ids if e in atom_to_bead}
+        pre_chains: Dict[int, Tuple[int, ...]] = {}
+        for init_id in initiator_ids:
+            bead_id = atom_to_bead.get(init_id)
+            if bead_id is None:
+                continue
+            btype = pre_bead_types[bead_id]
+            chain_bead_ids = _trace_bead_chain(bead_id, bead_bonds, edge_bead_ids)
+            chain_types = tuple(pre_bead_types[bid] for bid in chain_bead_ids)
+            pre_chains[btype] = chain_types
+
+        # 7. 构建 type_map
+        post_bead_types: Dict[int, int] = {}
+        for bead_id_str, info in post_data.items():
+            post_bead_types[int(bead_id_str)] = info['bead_type']
+
+        type_map: Dict[int, int] = {}
+        for bid, pre_type in pre_bead_types.items():
+            post_type = post_bead_types.get(bid, pre_type)
+            if pre_type != post_type:
+                type_map[pre_type] = post_type
+
+        # 8. 构建 bead_id_map
+        post_atom_to_bead: Dict[int, int] = {}
+        for bead_id_str, info in post_data.items():
+            bid = int(bead_id_str)
+            for a in info['atoms']:
+                post_atom_to_bead[a] = bid
+        bead_id_map: Dict[int, int] = {}
+        for pre_atom, post_atom in equivalences.items():
+            pre_bead = atom_to_bead.get(pre_atom)
+            post_bead = post_atom_to_bead.get(post_atom)
+            if pre_bead is not None and post_bead is not None and pre_bead != post_bead:
+                bead_id_map[pre_bead] = post_bead
+
+        # 9. 索引
+        sig = CGReactionSignature(
+            name=rxn_name,
+            signature_3bead=sig_3bead,
+            pre_chains=pre_chains,
+            type_map=type_map,
+            bead_id_map=bead_id_map,
+        )
+        signature_index[sig_3bead].append(sig)
+        all_signatures.append(sig)
+        end_types.add(end_type)
+        monomer_types.add(monomer_type)
+
+    return (dict(signature_index), all_signatures, end_types, monomer_types)
 
 
 # ============================================================
-# 步骤 1: 从模板 YAML 加载 3-bead 类型签名
+# 步骤 1: 从模板 YAML 加载 3-bead 类型签名 (交叉验证)
 # ============================================================
 
 def load_reaction_signatures(reactions_dir: Path) -> Dict[Tuple[int, ...], Dict]:
