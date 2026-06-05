@@ -269,7 +269,7 @@ def load_template_signatures(reactions_dir: Path) -> Tuple[
 
 def validate_chain(cg_graph_after: Dict[int, List[int]],
                    start_bead: int,
-                   exclude_bead: int,
+                   exclude_bead: Optional[int],
                    expected_chain: Tuple[int, ...],
                    bead_type_lut: Dict[int, int]) -> bool:
     """
@@ -316,7 +316,8 @@ def match_reaction(new_bond: Tuple[int, int],
                    cg_graph_after: Dict[int, List[int]],
                    signature_index: Dict[Tuple[int, int, int], List[CGReactionSignature]],
                    end_types: Set[int],
-                   monomer_types: Set[int]) -> Optional[CGReactionSignature]:
+                   monomer_types: Set[int],
+                   interior_types: Set[int]) -> Optional[CGReactionSignature]:
     """
     两级匹配：3-bead 粗筛 → [chain 精筛(按需)]。
 
@@ -332,6 +333,7 @@ def match_reaction(new_bond: Tuple[int, int],
         signature_index: load_template_signatures() 返回的索引
         end_types: 所有 end bead 类型
         monomer_types: 所有 monomer bead 类型
+        interior_types: 所有 interior bead 类型
 
     Returns:
         匹配的 CGReactionSignature 或 None
@@ -359,7 +361,6 @@ def match_reaction(new_bond: Tuple[int, int],
     # 找 interior neighbor (end_bead 在图中除 monomer 外的邻居)
     interior_bead = None
     interior_type = None
-    interior_types: Set[int] = {k[0] for k in signature_index.keys()}
     for nb in cg_graph_after.get(end_bead, []):
         if nb == monomer_bead:
             continue
