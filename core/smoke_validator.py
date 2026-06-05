@@ -425,8 +425,10 @@ class SmokeValidator:
                 for j, total in enumerate(totals):
                     details.append(f"  反应 {j+1}: {total}")
 
+            # 独立判断 D 状态，不受前序检查影响
+            d_passed = all_non_negative and (n_data_lines == loop_num)
             SmokeValidator._record(report, "D. 反应计数合理性",
-                                   "pass" if report.passed else "fail",
+                                   "pass" if d_passed else "fail",
                                    "\n".join(details))
 
         except Exception as e:
