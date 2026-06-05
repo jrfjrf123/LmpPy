@@ -31,7 +31,7 @@ class CGReactionSignature:
     signature_3bead: Tuple[int, int, int]        # (interior_type, end_type, monomer_type)
     pre_chains: Dict[int, Tuple[int, ...]]       # initiator_bead_type → 向外的类型链
     type_map: Dict[int, int]                     # {old_bead_type: new_bead_type}
-    bead_id_map: Dict[int, int]                  # {old_local_bead_id: new_local_bead_id}，空=不变
+    bead_id_map: Dict[int, int] = field(default_factory=dict)  # {old_local_bead_id: new_local_bead_id}，空=不变
 
 
 def _trace_bead_chain(start_bead: int,
@@ -79,15 +79,17 @@ def load_template_signatures(reactions_dir: Path) -> Tuple[
         all_signatures: 所有签名的列表
         end_types: 所有 end bead 类型集合 (运行时区分 end/monomer)
         monomer_types: 所有 monomer bead 类型集合
+        interior_types: 所有 interior bead 类型集合
     """
     signature_index: Dict[Tuple[int, int, int], List[CGReactionSignature]] = defaultdict(list)
     all_signatures: List[CGReactionSignature] = []
     end_types: Set[int] = set()
     monomer_types: Set[int] = set()
+    interior_types: Set[int] = set()
 
     reactions_path = Path(reactions_dir)
     if not reactions_path.exists() or not reactions_path.is_dir():
-        return dict(signature_index), all_signatures, end_types, monomer_types
+        return dict(signature_index), all_signatures, end_types, monomer_types, interior_types
 
     for rxn_dir in sorted(reactions_path.iterdir()):
         if not rxn_dir.is_dir():
@@ -252,8 +254,9 @@ def load_template_signatures(reactions_dir: Path) -> Tuple[
         all_signatures.append(sig)
         end_types.add(end_type)
         monomer_types.add(monomer_type)
+        interior_types.add(interior_type)
 
-    return (dict(signature_index), all_signatures, end_types, monomer_types)
+    return (dict(signature_index), all_signatures, end_types, monomer_types, interior_types)
 
 
 # ============================================================
