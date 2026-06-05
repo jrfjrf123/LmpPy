@@ -22,6 +22,7 @@ import argparse
 from time import time
 from copy import deepcopy
 from pathlib import Path
+from typing import Dict
 
 import numpy as np
 
@@ -51,8 +52,6 @@ from core import (
     LAMMPSDataExtractor, get_atoms_bonds_info, get_lmp_box_info,
     # 反应处理
     BondDetector, BondChanges, get_changed_atoms,
-    ReactionLocator, ReactionMatch,
-    CGMapper, CGMapping,
     CGConverter, lammpstrj2cg,
     CGBondMapper, atom_bonds_to_cg_bonds,
     BondsRecorder, save_bonds_record,
@@ -170,6 +169,21 @@ class LAMMPSReactionRunner:
                 self.system_config, self.config_dir
             )
         print(f"  CG映射原子数: {len(self.cg_compare_list.data)}")
+
+        # 加载 CG 级反应签名（用于 _update_cg_mapping 生产级匹配）
+        self.cg_signature_index: Dict = {}
+        self.cg_all_signatures = []
+        self.cg_end_types: set = set()
+        self.cg_monomer_types: set = set()
+        self.cg_interior_types: set = set()
+        if reaction_dir.exists():
+            from core.cg_reaction_identifier import load_template_signatures
+            (self.cg_signature_index,
+             self.cg_all_signatures,
+             self.cg_end_types,
+             self.cg_monomer_types,
+             self.cg_interior_types) = load_template_signatures(reaction_dir)
+            print(f"  CG 反应签名数: {len(self.cg_all_signatures)}")
 
     def _init_components(self):
         """初始化组件"""
@@ -477,68 +491,105 @@ class LAMMPSReactionRunner:
 
     def _update_cg_mapping(self, bonds_before, bonds_after, types_after, n_atoms):
         """
-        更新 CG 映射
+        更新 CG 映射（重写版：CG 签名匹配替代 AA BFS）。
 
-        基于反应模板匹配结果更新 CG mapping 中的 bead_type。
-        反应后，参与反应的原子的 bead_type 可能改变。
+        流程:
+        1. AA 键 → CG 键转换
+        2. CG 键差集 → 新 CG 键
+        3. 两级匹配（3-bead 粗筛 → chain 精筛按需）
+        4. bead_type + bead_id 原地更新
 
         Args:
             bonds_before: 反应前键连表 (n_bonds, 3)
             bonds_after: 反应后键连表 (n_bonds, 3)
-            types_after: 反应后原子类型 (n_atoms,)
+            types_after: 反应后原子类型 (n_atoms,)  — 保留签名兼容，本次未使用
             n_atoms: 原子总数
 
         Returns:
             bool: 是否成功更新
         """
-        # 检查是否有反应模板
-        if not self.reaction_templates:
+        if not self.cg_all_signatures:
             return False
 
         try:
-            # 使用 ReactionLocator 定位反应
-            locator = ReactionLocator(self.reaction_templates)
-            matches = locator.locate(
-                bonds_before, bonds_after, types_after, n_atoms
+            from core.cg_reaction_identifier import (
+                build_cg_bond_graph, get_cg_bond_diff, match_reaction
             )
 
-            if not matches:
+            cg_mapping_data = self.cg_compare_list.data
+
+            # 1. AA → CG 键转换
+            cg_bonds_before = atom_bonds_to_cg_bonds(bonds_before, cg_mapping_data)
+            cg_bonds_after = atom_bonds_to_cg_bonds(bonds_after, cg_mapping_data)
+
+            # 2. CG 键差集
+            new_cg_bonds = get_cg_bond_diff(cg_bonds_before, cg_bonds_after)
+            if not new_cg_bonds:
                 return False
 
-            # 转换 cg_compare_list 为 CGMapping
-            cg_mapping = CGMapping.from_cg_compare_list(
-                self.cg_compare_list.data, n_atoms
-            )
+            # 3. 构建运行时查询结构
+            cg_graph_after = build_cg_bond_graph(cg_bonds_after)
+            bead_type_lut: Dict[int, int] = {}
+            for row in cg_mapping_data:
+                bid = int(row[0])
+                if bid > 0:
+                    bead_type_lut[bid] = int(row[2])
 
-            # 使用 CGMapper 更新
-            mapper = CGMapper()
-            updated_mapping = mapper.batch_update(
-                cg_mapping, matches, self.reaction_templates
-            )
+            # 4. 逐键匹配
+            bead_type_updates: Dict[int, int] = {}
+            bead_id_updates: Dict[int, int] = {}
+            matched_count = 0
 
-            # 转换回 cg_compare_list 格式
-            # 需要保留原有的 mol_id 和 mass
-            old_data = self.cg_compare_list.data
-            new_data = updated_mapping.to_cg_compare_list()
+            for new_bond in new_cg_bonds:
+                sig = match_reaction(
+                    new_bond, bead_type_lut, cg_graph_after,
+                    self.cg_signature_index, self.cg_end_types,
+                    self.cg_monomer_types, self.cg_interior_types
+                )
+                if sig is None:
+                    continue
 
-            # 保留 mol_id 和 mass（to_cg_compare_list 会生成默认值）
-            # new_data 格式: [bead_id, mol_id, bead_type, AA_id, mass]
-            # 我们需要更新 bead_id 和 bead_type，保留 mol_id 和 mass
-            for i in range(len(old_data)):
-                atom_id = int(old_data[i, 3])  # AA_id
-                # 找到新 mapping 中对应的行
-                new_row_mask = new_data[:, 3] == atom_id
-                if np.any(new_row_mask):
-                    new_idx = np.where(new_row_mask)[0][0]
-                    # 更新 bead_id 和 bead_type
-                    old_data[i, 0] = new_data[new_idx, 0]  # bead_id
-                    old_data[i, 2] = new_data[new_idx, 2]  # bead_type
+                matched_count += 1
+                b1, b2 = new_bond
+                t1 = bead_type_lut[b1]
+                t2 = bead_type_lut[b2]
 
-            self.cg_compare_list.data = old_data
+                # 区分端和单体
+                if t1 in self.cg_end_types and t2 in self.cg_monomer_types:
+                    end_bead, monomer_bead = b1, b2
+                elif t2 in self.cg_end_types and t1 in self.cg_monomer_types:
+                    end_bead, monomer_bead = b2, b1
+                else:
+                    continue
+
+                # 收集 type 更新
+                new_type = sig.type_map.get(bead_type_lut[end_bead])
+                if new_type is not None:
+                    bead_type_updates[end_bead] = new_type
+                new_type = sig.type_map.get(bead_type_lut[monomer_bead])
+                if new_type is not None:
+                    bead_type_updates[monomer_bead] = new_type
+
+            if matched_count == 0:
+                return False
+
+            # 5. 向量化批量应用 bead_type 更新
+            for bead_id, new_type in bead_type_updates.items():
+                mask = cg_mapping_data[:, 0].astype(int) == bead_id
+                cg_mapping_data[mask, 2] = float(new_type)
+
+            # 6. bead_id 重分配（按需，当前 EPR 体系为空操作）
+            for old_bead_id, new_bead_id in bead_id_updates.items():
+                mask = cg_mapping_data[:, 0].astype(int) == old_bead_id
+                cg_mapping_data[mask, 0] = float(new_bead_id)
+
+            self.cg_compare_list.data = cg_mapping_data
             return True
 
         except Exception as e:
+            import traceback
             print(f"警告: CG 映射更新失败: {e}")
+            traceback.print_exc()
             return False
 
     def _init_lammps(self):
@@ -592,17 +643,41 @@ class LAMMPSReactionRunner:
 
             lmp.command("log none")
 
-        # 加载分子模板 (从lammps_params.yaml的molecules配置)
+        # 加载分子模板
+        # 策略：从 molecules 配置和 reactions 配置中合并加载，避免重复
+        loaded_mols = set()
+
+        # 1. 从 molecules 配置加载 (向后兼容)
         if params.molecules:
-            print(f"  加载分子模板: {len(params.molecules)} 个")
+            print(f"  加载分子模板 (molecules配置): {len(params.molecules)} 个")
             for mol_name, mol_file in params.molecules.items():
-                # 解析文件路径 (支持相对路径)
                 mol_path = self.config_dir / mol_file
                 if not mol_path.exists():
                     print(f"    警告: 分子模板文件不存在: {mol_path}")
                     continue
                 lmp.command(f"molecule {mol_name} {mol_path}")
                 print(f"    加载: {mol_name} <- {mol_file}")
+                loaded_mols.add(mol_name)
+
+        # 2. 从 reactions 配置加载 (自动发现路径)
+        if params.reactions:
+            rxn_mols = []
+            for rxn in params.reactions:
+                if rxn.pre_mol and rxn.pre_mol not in loaded_mols and rxn.pre_template:
+                    rxn_mols.append((rxn.pre_mol, rxn.pre_template))
+                if rxn.post_mol and rxn.post_mol not in loaded_mols and rxn.post_template:
+                    rxn_mols.append((rxn.post_mol, rxn.post_template))
+
+            if rxn_mols:
+                print(f"  加载分子模板 (reactions配置): {len(rxn_mols)} 个")
+                for mol_name, mol_path_str in rxn_mols:
+                    mol_path = Path(mol_path_str)
+                    if not mol_path.exists():
+                        print(f"    警告: 分子模板文件不存在: {mol_path}")
+                        continue
+                    lmp.command(f"molecule {mol_name} {mol_path}")
+                    print(f"    加载: {mol_name} <- {mol_path}")
+                    loaded_mols.add(mol_name)
 
         # 设置速度
         velocity_seed = np.random.randint(10, 10000)
