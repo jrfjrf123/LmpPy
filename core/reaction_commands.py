@@ -85,6 +85,8 @@ class BondCreateConfig:
     """bond/create 配置容器"""
     pairs: List[BondCreatePair] = field(default_factory=list)
     cg_type_map: Dict[int, int] = field(default_factory=dict)
+    sequential: bool = True                     # 顺序执行每对，避免多 fix 冲突
+    relax_radius: float = 0.0                   # 松弛反应原子组半径 (Å)
 
 
 # ============================================================================
@@ -216,7 +218,16 @@ def load_bond_create_config(data: dict) -> BondCreateConfig:
                 )
             cg_type_map[old_type] = new_type
 
-    return BondCreateConfig(pairs=pairs, cg_type_map=cg_type_map)
+    # 解析 sequential 和 relax_radius
+    sequential = bool(data.get('sequential', True))
+    relax_radius = float(data.get('relax_radius', 0.0))
+    if relax_radius < 0:
+        raise BondCreateConfigError(f"relax_radius 不能为负数，当前值: {relax_radius}")
+
+    return BondCreateConfig(
+        pairs=pairs, cg_type_map=cg_type_map,
+        sequential=sequential, relax_radius=relax_radius,
+    )
 
 
 # ============================================================================
