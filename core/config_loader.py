@@ -398,6 +398,9 @@ class LAMMPSParams:
     # pair style (用于 SOAP 计算时获取 neighbor list)
     pair_style: str = "lj/cut"  # 默认值，可在 lammps_params.yaml 中覆盖
 
+    # bond/create 模式配置 (可选)
+    bond_create_config: Optional[Any] = None  # BondCreateConfig，None 表示使用 bond/react
+
 
 @dataclass
 class ReactionConfig:
@@ -695,6 +698,28 @@ class ConfigLoader:
             validate_files=True
         )
 
+        # 解析 bond_create 配置（与 bond_react 互斥）
+        bond_create_config = None
+        bond_create_data = data.get('bond_create', {})
+        if bond_create_data.get('enabled', False):
+            # 验证互斥：bond_create 启用时 bond_react.reactions 不能存在
+            if br.get('reactions'):
+                raise ConfigValidationError(
+                    "bond_create.enabled=true 与 bond_react.reactions 不能同时存在，"
+                    "请选择其中一种模式",
+                    path
+                )
+            # 导入 bond_create 配置加载函数
+            try:
+                from .reaction_commands import load_bond_create_config, BondCreateConfigError
+            except ImportError:
+                from reaction_commands import load_bond_create_config, BondCreateConfigError
+
+            try:
+                bond_create_config = load_bond_create_config(bond_create_data)
+            except BondCreateConfigError as e:
+                raise ConfigValidationError(str(e), path)
+
         # 解析files配置
         files = data.get('files', {})
 
@@ -749,7 +774,8 @@ class ConfigLoader:
             output_cg_angles=files.get('output_cg_angles', 'cg_angles.txt'),
             output_cg_dihedrals=files.get('output_cg_dihedrals', 'cg_dihedrals.txt'),
             read_data_extra=read_data_extra,
-            pair_style=sim.get('pair_style', 'lj/cut')
+            pair_style=sim.get('pair_style', 'lj/cut'),
+            bond_create_config=bond_create_config,
         )
 
     def load_mapping_config(self, mapping_path: str) -> MappingConfig:
@@ -1430,6 +1456,14 @@ class ConfigValidator:
 
         # 检查 stabilization
         self._check_range(params.stabilization, 'stabilization')
+
+        # 验证 bond_create 与 bond_react 互斥
+        if params.bond_create_config is not None and params.reactions:
+            self._add_error(
+                "semantic", "bond_create/reactions",
+                "bond_create 与 bond_react 不能同时启用",
+                "在 lammps_params.yaml 中只保留一种模式"
+            )
 
         # 检查每个反应的 cutoff
         for rxn in params.reactions:

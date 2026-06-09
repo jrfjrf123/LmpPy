@@ -132,43 +132,51 @@ class LAMMPSReactionRunner:
 
     def _load_configs(self):
         """加载所有配置"""
-        print("=" * 60)
-        print("加载配置文件...")
-        print("=" * 60)
+        if me == 0:
+            print("=" * 60)
+            print("加载配置文件...")
+            print("=" * 60)
 
         loader = ConfigLoader(str(self.config_dir))
 
         # 加载系统配置
         self.system_config = loader.load_system_config()
-        print(f"  体系名称: {self.system_config.name}")
+        if me == 0:
+            print(f"  体系名称: {self.system_config.name}")
 
         # 加载LAMMPS参数
         self.lammps_params = loader.load_lammps_params()
-        print(f"  循环次数: {self.lammps_params.loop_num}")
+        if me == 0:
+            print(f"  循环次数: {self.lammps_params.loop_num}")
 
         # 加载质量列表 (传入 data_file 用于自动提取)
         self.mass_list = loader.load_mass_list(self.lammps_params.data_file)
-        print(f"  原子类型数: {len(self.mass_list)}")
+        if me == 0:
+            print(f"  原子类型数: {len(self.mass_list)}")
 
         # 加载反应模板
         reaction_dir = self.config_dir / "reactions"
         if reaction_dir.exists():
             self.reaction_templates = load_all_reaction_templates(reaction_dir)
-            print(f"  反应模板数: {len(self.reaction_templates)}")
+            if me == 0:
+                print(f"  反应模板数: {len(self.reaction_templates)}")
         else:
             self.reaction_templates = {}
-            print("  反应模板数: 0 (未找到reactions目录)")
+            if me == 0:
+                print("  反应模板数: 0 (未找到reactions目录)")
 
         # CG映射：优先加载已有文件，否则生成
         cg_mapping_path = self.config_dir / self.lammps_params.initial_cg_mapping
         if cg_mapping_path.exists():
             self.cg_compare_list = CGCompareList.from_csv(str(cg_mapping_path))
-            print(f"  加载已有CG映射: {self.lammps_params.initial_cg_mapping}")
+            if me == 0:
+                print(f"  加载已有CG映射: {self.lammps_params.initial_cg_mapping}")
         else:
             self.cg_compare_list = generate_cg_compare_list(
                 self.system_config, self.config_dir
             )
-        print(f"  CG映射原子数: {len(self.cg_compare_list.data)}")
+        if me == 0:
+            print(f"  CG映射原子数: {len(self.cg_compare_list.data)}")
 
         # 加载 CG 级反应签名（用于 _update_cg_mapping 生产级匹配）
         self.cg_signature_index: Dict = {}
@@ -183,7 +191,14 @@ class LAMMPSReactionRunner:
              self.cg_end_types,
              self.cg_monomer_types,
              self.cg_interior_types) = load_template_signatures(reaction_dir)
-            print(f"  CG 反应签名数: {len(self.cg_all_signatures)}")
+            if me == 0:
+                print(f"  CG 反应签名数: {len(self.cg_all_signatures)}")
+
+        # 判断反应模式
+        self.bond_create_config = self.lammps_params.bond_create_config
+        self.reaction_mode = "bond/create" if self.bond_create_config is not None else "bond/react"
+        if me == 0:
+            print(f"  反应模式: {self.reaction_mode}")
 
     def _init_components(self):
         """初始化组件"""
@@ -212,7 +227,8 @@ class LAMMPSReactionRunner:
         - CG 转换: 只在有反应时进行
         """
         if lammps is None:
-            print("错误: LAMMPS未安装，无法运行模拟")
+            if me == 0:
+                print("错误: LAMMPS未安装，无法运行模拟")
             return
 
         # 切换工作目录到配置目录 (LAMMPS 需要从当前目录读取文件)
@@ -271,8 +287,11 @@ class LAMMPSReactionRunner:
             if i % 1000 == 0 and me == 0:
                 print(f"  循环进度: {i}/{params.loop_num}")
 
-            # Step 1: 运行 bond/react
-            self._run_bond_react(lmp, params)
+            # Step 1: 运行反应步骤（按模式分支）
+            if self.reaction_mode == "bond/create":
+                self._run_bond_create(lmp, params)
+            else:
+                self._run_bond_react(lmp, params)
 
             # Step 2: 检查反应并处理
             if me == 0:
@@ -326,14 +345,23 @@ class LAMMPSReactionRunner:
                     # 保存 CG mapping（反应前）
                     cg_mapping_before = self.cg_compare_list.data.copy()
 
-                    # 更新 CG 映射 (如果有键变化)
+                    # 更新 CG 映射 (按模式选择更新策略)
                     if bond_changes.has_changes:
-                        self._update_cg_mapping(
-                            cached['bonds'],
-                            bond_data_after.bonds,
-                            atom_data_after.types,
-                            len(atom_data_after.ids)
-                        )
+                        if self.reaction_mode == "bond/create":
+                            from core.reaction_commands import update_cg_mapping_create
+                            update_cg_mapping_create(
+                                self.cg_compare_list.data,
+                                cached['bonds'],
+                                bond_data_after.bonds,
+                                self.bond_create_config.cg_type_map
+                            )
+                        else:
+                            self._update_cg_mapping(
+                                cached['bonds'],
+                                bond_data_after.bonds,
+                                atom_data_after.types,
+                                len(atom_data_after.ids)
+                            )
 
                     # 保存 CG mapping（反应后，如果更新成功则与 before 不同）
                     cg_mapping_after = self.cg_compare_list.data.copy()
@@ -396,8 +424,11 @@ class LAMMPSReactionRunner:
 
             # 无反应时不需要更新 coords/ixyz，松弛后再更新
 
-            # Step 3: 松弛阶段
-            self._run_relaxation(lmp, params)
+            # Step 3: 松弛阶段（按模式分支）
+            if self.reaction_mode == "bond/create":
+                self._run_relaxation_create(lmp, params)
+            else:
+                self._run_relaxation(lmp, params)
 
             # Step 4: 松弛后更新 coords/ixyz (所有进程参与 MPI 集合操作)
             atom_data = self.data_extractor.extract_atoms(lmp, use_cache=True)
@@ -588,8 +619,9 @@ class LAMMPSReactionRunner:
 
         except Exception as e:
             import traceback
-            print(f"警告: CG 映射更新失败: {e}")
-            traceback.print_exc()
+            if me == 0:
+                print(f"警告: CG 映射更新失败: {e}")
+                traceback.print_exc()
             return False
 
     def _init_lammps(self):
@@ -607,7 +639,8 @@ class LAMMPSReactionRunner:
             lmp.command("log none")
         else:
             # 使用内置初始化命令
-            print("  使用内置LAMMPS初始化...")
+            if me == 0:
+                print("  使用内置LAMMPS初始化...")
 
             # 1. 基本设置
             lmp.command(f"units {LAMMPS_UNITS}")
@@ -632,7 +665,8 @@ class LAMMPSReactionRunner:
                 f"extra/angle/per/atom {extra.angle_per_atom} "
                 f"extra/dihedral/per/atom {extra.dihedral_per_atom}"
             )
-            print(f"    读取数据文件: {params.data_file}")
+            if me == 0:
+                print(f"    读取数据文件: {params.data_file}")
             lmp.command(read_data_cmd)
 
             # 4. 邻居列表设置
@@ -649,18 +683,21 @@ class LAMMPSReactionRunner:
 
         # 1. 从 molecules 配置加载 (向后兼容)
         if params.molecules:
-            print(f"  加载分子模板 (molecules配置): {len(params.molecules)} 个")
+            if me == 0:
+                print(f"  加载分子模板 (molecules配置): {len(params.molecules)} 个")
             for mol_name, mol_file in params.molecules.items():
                 mol_path = self.config_dir / mol_file
                 if not mol_path.exists():
-                    print(f"    警告: 分子模板文件不存在: {mol_path}")
+                    if me == 0:
+                        print(f"    警告: 分子模板文件不存在: {mol_path}")
                     continue
                 lmp.command(f"molecule {mol_name} {mol_path}")
-                print(f"    加载: {mol_name} <- {mol_file}")
+                if me == 0:
+                    print(f"    加载: {mol_name} <- {mol_file}")
                 loaded_mols.add(mol_name)
 
-        # 2. 从 reactions 配置加载 (自动发现路径)
-        if params.reactions:
+        # 2. 从 reactions 配置加载 (仅 bond/react 模式)
+        if self.reaction_mode == "bond/react" and params.reactions:
             rxn_mols = []
             for rxn in params.reactions:
                 if rxn.pre_mol and rxn.pre_mol not in loaded_mols and rxn.pre_template:
@@ -669,14 +706,17 @@ class LAMMPSReactionRunner:
                     rxn_mols.append((rxn.post_mol, rxn.post_template))
 
             if rxn_mols:
-                print(f"  加载分子模板 (reactions配置): {len(rxn_mols)} 个")
+                if me == 0:
+                    print(f"  加载分子模板 (reactions配置): {len(rxn_mols)} 个")
                 for mol_name, mol_path_str in rxn_mols:
-                    mol_path = Path(mol_path_str)
+                    mol_path = self.config_dir / mol_path_str
                     if not mol_path.exists():
-                        print(f"    警告: 分子模板文件不存在: {mol_path}")
+                        if me == 0:
+                            print(f"    警告: 分子模板文件不存在: {mol_path}")
                         continue
                     lmp.command(f"molecule {mol_name} {mol_path}")
-                    print(f"    加载: {mol_name} <- {mol_path}")
+                    if me == 0:
+                        print(f"    加载: {mol_name} <- {mol_path}")
                     loaded_mols.add(mol_name)
 
         # 设置速度
@@ -724,6 +764,16 @@ class LAMMPSReactionRunner:
         lmp.command("thermo_style custom step temp press density")
         lmp.command(f"run {params.bond_react_check_step}")
 
+    def _run_bond_create(self, lmp, params):
+        """运行 fix bond/create"""
+        from core.reaction_commands import generate_fix_bond_create
+
+        cmd = generate_fix_bond_create(self.bond_create_config)
+        lmp.command(cmd)
+        lmp.command(self._get_ensemble_fix(params, "all", "create_ensemble"))
+        lmp.command("thermo_style custom step temp press density")
+        lmp.command(f"run {params.bond_react_check_step}")
+
     def _run_relaxation(self, lmp, params: LAMMPSParams):
         """运行松弛阶段"""
         temp = params.temperature
@@ -754,18 +804,48 @@ class LAMMPSReactionRunner:
 
         lmp.command("unfix normal_npt")
 
+    def _run_relaxation_create(self, lmp, params):
+        """
+        bond/create 松弛阶段
+
+        策略: 全局 NVE/limit（吸收键能冲击）→ 全局系综（NVT 或 NPT）
+        """
+        # 0. 关闭 bond/create 阶段的 fix
+        lmp.command("unfix bond_create_fix")
+        lmp.command("unfix create_ensemble")
+        lmp.command("thermo_style custom step temp press density")
+
+        # 1. 全局 NVE/limit（吸收键能冲击）
+        lmp.command(f"fix relax_nve all nve/limit {params.stabilization}")
+        lmp.command(f"run {params.nve_limit_step}")
+        lmp.command("unfix relax_nve")
+
+        # 2. 全局系综控制（NVT 或 NPT，复用 _get_ensemble_fix 中的 ensemble 判断）
+        lmp.command(self._get_ensemble_fix(params, "all", "relax_ensemble"))
+        normal_step = params.run_step - params.nve_limit_step - params.bond_react_check_step
+        lmp.command(f"run {normal_step}")
+        lmp.command("unfix relax_ensemble")
+
     def _get_react_num(self, lmp) -> dict:
         """获取反应数量"""
         react_nums = {}
-        # 使用 lammps_params.reactions 而不是 reaction_templates
-        for i, rxn in enumerate(self.lammps_params.reactions):
+
+        if self.reaction_mode == "bond/create":
+            # bond/create 的 fix 输出全局向量 [本步创建数, 累计创建数]
             try:
-                # 使用正确的 LAMMPS API: extract_fix(fix_name, style, type, nrow)
-                # LMP_STYLE_GLOBAL=0, LMP_TYPE_VECTOR=1
-                num = lmp.extract_fix("rxns", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR, nrow=i)
-                react_nums[rxn.name] = int(num) if num else 0
-            except:
-                react_nums[rxn.name] = 0
+                num = lmp.extract_fix("bond_create_fix", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR, nrow=0)
+                react_nums[f"bond_create_type{self.bond_create_config.bondtype}"] = int(num) if num else 0
+            except Exception:
+                react_nums["bond_create"] = 0
+        else:
+            # bond/react 原有逻辑
+            for i, rxn in enumerate(self.lammps_params.reactions):
+                try:
+                    num = lmp.extract_fix("rxns", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR, nrow=i)
+                    react_nums[rxn.name] = int(num) if num else 0
+                except Exception:
+                    react_nums[rxn.name] = 0
+
         return react_nums
 
     def _unwrap_coords(self, coords, bonds, molecule_ids, box):
@@ -814,38 +894,39 @@ class LAMMPSReactionRunner:
 
             # 统计
             t2 = time()
-            print("\n" + "=" * 60)
-            print("模拟完成!")
-            print("=" * 60)
-            print(f"  总运行时间: {t2 - t1:.2f} 秒")
-            print(f"  反应统计:")
-            for name, num in self.reacted_nums.items():
-                print(f"    {name}: {num}")
+            if me == 0:
+                print("\n" + "=" * 60)
+                print("模拟完成!")
+                print("=" * 60)
+                print(f"  总运行时间: {t2 - t1:.2f} 秒")
+                print(f"  反应统计:")
+                for name, num in self.reacted_nums.items():
+                    print(f"    {name}: {num}")
 
-            # 保存键连表记录
-            if self.bonds_recorder.n_records > 0:
-                paths = self.bonds_recorder.save_all()
-                print(f"  键连表记录: {len(paths)} 个文件")
+                # 保存键连表记录
+                if self.bonds_recorder.n_records > 0:
+                    paths = self.bonds_recorder.save_all()
+                    print(f"  键连表记录: {len(paths)} 个文件")
 
-            # 批量输出反应帧数据
-            n_reactions = len(self.reaction_frames['timestep'])
-            if n_reactions > 0:
-                print(f"  反应帧数: {n_reactions}")
-                np.savez(
-                    'reaction_frames.npz',
-                    aa_coords_before=np.array(self.reaction_frames['aa_coords_before']),
-                    aa_coords_after=np.array(self.reaction_frames['aa_coords_after']),
-                    aa_ids=np.array(self.reaction_frames['aa_ids']),
-                    aa_types=np.array(self.reaction_frames['aa_types']),
-                    aa_bonds_before=np.array(self.reaction_frames['aa_bonds_before'], dtype=object),
-                    aa_bonds_after=np.array(self.reaction_frames['aa_bonds_after'], dtype=object),
-                    cg_mapping_before=np.array(self.reaction_frames['cg_mapping_before']),
-                    cg_mapping_after=np.array(self.reaction_frames['cg_mapping_after']),
-                    cg_bonds_before=np.array(self.reaction_frames['cg_bonds_before'], dtype=object),
-                    cg_bonds_after=np.array(self.reaction_frames['cg_bonds_after'], dtype=object),
-                    timestep=np.array(self.reaction_frames['timestep']),
-                )
-                print(f"  反应帧数据已保存到: reaction_frames.npz")
+                # 批量输出反应帧数据
+                n_reactions = len(self.reaction_frames['timestep'])
+                if n_reactions > 0:
+                    print(f"  反应帧数: {n_reactions}")
+                    np.savez(
+                        'reaction_frames.npz',
+                        aa_coords_before=np.array(self.reaction_frames['aa_coords_before']),
+                        aa_coords_after=np.array(self.reaction_frames['aa_coords_after']),
+                        aa_ids=np.array(self.reaction_frames['aa_ids']),
+                        aa_types=np.array(self.reaction_frames['aa_types']),
+                        aa_bonds_before=np.array(self.reaction_frames['aa_bonds_before'], dtype=object),
+                        aa_bonds_after=np.array(self.reaction_frames['aa_bonds_after'], dtype=object),
+                        cg_mapping_before=np.array(self.reaction_frames['cg_mapping_before']),
+                        cg_mapping_after=np.array(self.reaction_frames['cg_mapping_after']),
+                        cg_bonds_before=np.array(self.reaction_frames['cg_bonds_before'], dtype=object),
+                        cg_bonds_after=np.array(self.reaction_frames['cg_bonds_after'], dtype=object),
+                        timestep=np.array(self.reaction_frames['timestep']),
+                    )
+                    print(f"  反应帧数据已保存到: reaction_frames.npz")
 
 
 def main():
@@ -871,12 +952,17 @@ def main():
         report = harness.run()
         if report is not None:
             report.print()
-        sys.exit(0 if report.passed else 1)
+            sys.exit(0 if report.passed else 1)
+        else:
+            # 非 rank-0 进程: harness.run() 返回 None
+            # 模拟过程中如有错误会通过 MPI 异常传播，此处正常退出
+            sys.exit(0)
 
     # 检查配置目录
     config_dir = Path(args.config_dir)
     if not config_dir.exists():
-        print(f"错误: 配置目录不存在: {config_dir}")
+        if me == 0:
+            print(f"错误: 配置目录不存在: {config_dir}")
         sys.exit(1)
 
     # 创建运行器
