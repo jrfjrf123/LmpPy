@@ -325,6 +325,9 @@ class LAMMPSReactionRunner:
             # 广播反应结果给所有进程
             has_reaction = MPI.COMM_WORLD.bcast(has_reaction, root=0)
 
+            # 初始化反应原子列表（供 bond/create 松弛分治使用）
+            reacted_atom_ids = []
+
             if has_reaction:
                 # === 有反应：完整处理 ===
                 # 所有进程都需要调用 extract_all (MPI 集合操作)
@@ -349,6 +352,15 @@ class LAMMPSReactionRunner:
 
                     # 键变化检测
                     bond_changes = self._detect_bond_changes(cached['bonds'], bond_data_after.bonds)
+
+                    # 计算反应原子（仅 bond/create 模式需要，用于松弛分治）
+                    if self.reaction_mode == "bond/create" and bond_changes.has_changes:
+                        reacted_atom_ids = self._get_reacted_atom_ids(
+                            bond_changes.created_bonds,
+                            atom_data_after.coords,
+                            box,
+                            self.bond_create_config.relax_radius
+                        )
 
                     # 保存 CG mapping（反应前）
                     cg_mapping_before = self.cg_compare_list.data.copy()
@@ -434,7 +446,7 @@ class LAMMPSReactionRunner:
 
             # Step 3: 松弛阶段（按模式分支）
             if self.reaction_mode == "bond/create":
-                self._run_relaxation_create(lmp, params)
+                self._run_relaxation_create(lmp, params, reacted_atom_ids)
             else:
                 self._run_relaxation(lmp, params)
 
@@ -773,15 +785,17 @@ class LAMMPSReactionRunner:
         lmp.command(f"run {params.bond_react_check_step}")
 
     def _run_bond_create(self, lmp, params):
-        """运行 fix bond/create (支持多对)"""
+        """顺序执行每个 bond/create pair，避免多 fix 冲突"""
         from core.reaction_commands import generate_fix_bond_create
 
         cmds = generate_fix_bond_create(self.bond_create_config)
         for fix_id, cmd in cmds:
             lmp.command(cmd)
-        lmp.command(self._get_ensemble_fix(params, "all", "create_ensemble"))
-        lmp.command("thermo_style custom step temp press density")
-        lmp.command(f"run {params.bond_react_check_step}")
+            lmp.command(self._get_ensemble_fix(params, "all", "create_ensemble"))
+            lmp.command("thermo_style custom step temp press density")
+            lmp.command("run 1")
+            lmp.command(f"unfix {fix_id}")
+            lmp.command("unfix create_ensemble")
 
     def _run_relaxation(self, lmp, params: LAMMPSParams):
         """运行松弛阶段"""
@@ -813,28 +827,35 @@ class LAMMPSReactionRunner:
 
         lmp.command("unfix normal_npt")
 
-    def _run_relaxation_create(self, lmp, params):
+    def _run_relaxation_create(self, lmp, params, reacted_atom_ids):
         """
-        bond/create 松弛阶段
+        bond/create 松弛阶段: NVE/limit 仅作用于反应原子+邻近原子
 
-        策略: 全局 NVE/limit（吸收键能冲击）→ 全局系综（NVT 或 NPT）
+        Args:
+            reacted_atom_ids: 反应原子 + 邻近原子的 ID 列表
         """
-        # 0. 关闭所有 bond/create fix
-        for i in range(len(self.bond_create_config.pairs)):
-            lmp.command(f"unfix bond_create_fix_{i}")
-        lmp.command("unfix create_ensemble")
+        # 1. 创建反应/非反应原子组
+        if reacted_atom_ids:
+            atom_id_str = " ".join(str(aid) for aid in reacted_atom_ids)
+            lmp.command(f"group reaction_atom id {atom_id_str}")
+        else:
+            lmp.command("group reaction_atom empty")
+        lmp.command("group non_reaction_atom subtract all reaction_atom")
         lmp.command("thermo_style custom step temp press density")
 
-        # 1. 全局 NVE/limit（吸收键能冲击）
-        lmp.command(f"fix relax_nve all nve/limit {params.stabilization}")
+        # 2. NVE/limit + 系综分治
+        lmp.command(f"fix relax_nve reaction_atom nve/limit {params.stabilization}")
+        lmp.command(self._get_ensemble_fix(params, "non_reaction_atom", "relax_npt"))
         lmp.command(f"run {params.nve_limit_step}")
         lmp.command("unfix relax_nve")
+        lmp.command("unfix relax_npt")
 
-        # 2. 全局系综控制（NVT 或 NPT，复用 _get_ensemble_fix 中的 ensemble 判断）
-        lmp.command(self._get_ensemble_fix(params, "all", "relax_ensemble"))
-        normal_step = params.run_step - params.nve_limit_step - params.bond_react_check_step
+        # 3. 全局系综控制
+        lmp.command(self._get_ensemble_fix(params, "all", "normal_ensemble"))
+        n_pairs = len(self.bond_create_config.pairs)
+        normal_step = params.run_step - n_pairs - params.nve_limit_step
         lmp.command(f"run {normal_step}")
-        lmp.command("unfix relax_ensemble")
+        lmp.command("unfix normal_ensemble")
 
     def _get_react_num(self, lmp) -> dict:
         """获取反应数量"""
@@ -859,6 +880,58 @@ class LAMMPSReactionRunner:
                     react_nums[rxn.name] = 0
 
         return react_nums
+
+    def _get_reacted_atom_ids(self, created_bonds, coords, box, radius):
+        """
+        从新建键提取反应原子 + 半径内邻近原子
+
+        策略: 向量化距离矩阵，PBC 最小镜像修正
+
+        Args:
+            created_bonds: 新建键列表 (n, 4) [bond_id, type, atom1, atom2]
+            coords: 所有原子坐标 (n_atoms, 3)，1-indexed
+            box: 盒子边界 (3, 2)
+            radius: 搜索半径 (Å)
+
+        Returns:
+            list of int: 反应原子 + 邻近原子的 ID 列表
+        """
+        import numpy as np
+        from scipy.spatial.distance import cdist
+
+        # 1. 直接反应原子
+        if created_bonds.ndim == 1 or len(created_bonds) == 0:
+            return []
+        direct_atoms = np.unique(created_bonds[:, 1:3].astype(int).ravel())
+        if len(direct_atoms) == 0:
+            return []
+
+        # 2. PBC 距离: 反应原子 vs 所有原子
+        center_coords = coords[direct_atoms - 1]     # 0-indexed
+        box_size = box[:, 1] - box[:, 0]
+
+        # 检查是否需要 PBC 修正（盒子非零）
+        if np.any(box_size > 0):
+            dists_list = []
+            for center in center_coords:
+                delta = coords - center
+                # PBC 最小镜像修正
+                delta -= np.round(delta / box_size) * box_size
+                dists_list.append(np.sqrt(np.sum(delta ** 2, axis=1)))
+            dists = np.array(dists_list)
+        else:
+            dists = cdist(center_coords, coords)
+
+        # 3. 半径内所有原子
+        mask = np.any(dists < radius, axis=0)
+
+        # 4. 合并直接反应原子和邻近原子
+        all_reacted = np.unique(np.concatenate([
+            direct_atoms,
+            np.where(mask)[0] + 1  # 转回 1-indexed
+        ]))
+
+        return all_reacted.tolist()
 
     def _unwrap_coords(self, coords, bonds, molecule_ids, box):
         """
