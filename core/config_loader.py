@@ -691,12 +691,15 @@ class ConfigLoader:
                     'post_mol': rxn['post_mol'],
                 })
 
-        # 从目录统一加载，获取完整路径
-        reactions = load_reactions_from_directory(
-            self.config_dir,
-            reaction_configs,
-            validate_files=True
-        )
+        # 从目录统一加载，获取完整路径（无反应配置时跳过）
+        if reaction_configs:
+            reactions = load_reactions_from_directory(
+                self.config_dir,
+                reaction_configs,
+                validate_files=True
+            )
+        else:
+            reactions = []
 
         # 解析 bond_create 配置（与 bond_react 互斥）
         bond_create_config = None
@@ -1175,6 +1178,11 @@ class ConfigValidator:
     def _validate_reaction_files(self):
         """验证反应相关文件 - 使用完整路径验证"""
         if not self.lammps_params:
+            return
+
+        # bond/create 模式不需要 reactions 目录
+        if self.lammps_params.bond_create_config is not None:
+            self._add_success("file", "reactions/", "bond/create 模式跳过反应文件检查")
             return
 
         # 1. 检查 reactions 目录存在
