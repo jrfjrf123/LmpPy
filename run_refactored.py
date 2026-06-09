@@ -214,8 +214,13 @@ class LAMMPSReactionRunner:
         )
 
         # 初始化反应计数
-        for rxn in self.lammps_params.reactions:
-            self.reacted_nums[rxn.name] = 0
+        if self.reaction_mode == "bond/create":
+            for pair in self.bond_create_config.pairs:
+                key = f"{pair.itype}-{pair.jtype}"
+                self.reacted_nums[key] = 0
+        else:
+            for rxn in self.lammps_params.reactions:
+                self.reacted_nums[rxn.name] = 0
 
     def run(self):
         """
@@ -250,7 +255,10 @@ class LAMMPSReactionRunner:
                 output_cg_traj.unlink()
             reaction_count_file = self.config_dir / self.lammps_params.output_reaction_count
             f_react_num = open(reaction_count_file, "w")
-            rxn_names = [rxn.name for rxn in self.lammps_params.reactions]
+            if self.reaction_mode == "bond/create":
+                rxn_names = [f"{p.itype}-{p.jtype}" for p in self.bond_create_config.pairs]
+            else:
+                rxn_names = [rxn.name for rxn in self.lammps_params.reactions]
             f_react_num.write("# timestep " + " ".join(rxn_names) + "\n")
         else:
             f_react_num = None
