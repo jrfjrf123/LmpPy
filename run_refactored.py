@@ -917,19 +917,15 @@ class LAMMPSReactionRunner:
         if len(direct_atoms) == 0:
             return []
 
-        # 2. PBC 距离: 反应原子 vs 所有原子
-        center_coords = coords[direct_atoms - 1]     # 0-indexed
+        # 2. PBC 距离: 反应原子 vs 所有原子（完全向量化）
+        center_coords = coords[direct_atoms - 1]     # 0-indexed, (n_center, 3)
         box_size = box[:, 1] - box[:, 0]
 
-        # 检查是否需要 PBC 修正（盒子非零）
         if np.any(box_size > 0):
-            dists_list = []
-            for center in center_coords:
-                delta = coords - center
-                # PBC 最小镜像修正
-                delta -= np.round(delta / box_size) * box_size
-                dists_list.append(np.sqrt(np.sum(delta ** 2, axis=1)))
-            dists = np.array(dists_list)
+            # 广播: (n_center, 1, 3) - (1, n_atoms, 3) → (n_center, n_atoms, 3)
+            delta = center_coords[:, np.newaxis, :] - coords[np.newaxis, :, :]
+            delta -= np.round(delta / box_size) * box_size
+            dists = np.sqrt(np.sum(delta ** 2, axis=2))  # (n_center, n_atoms)
         else:
             dists = cdist(center_coords, coords)
 
