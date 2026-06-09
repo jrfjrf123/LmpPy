@@ -12,7 +12,7 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 
@@ -30,11 +30,11 @@ class BondCreateConfigError(Exception):
 # ============================================================================
 
 @dataclass
-class BondCreateConfig:
-    """bond/create 配置容器"""
-    Nevery: int
+class BondCreatePair:
+    """单个 bond/create 类型对配置"""
     itype: int
     jtype: int
+    Nevery: int
     Rmin: float
     bondtype: int
     iparam_maxbond: int = 0
@@ -43,17 +43,19 @@ class BondCreateConfig:
     jparam_newtype: Optional[int] = None
     prob_fraction: float = 1.0
     prob_seed: Optional[int] = None
-    cg_type_map: Dict[int, int] = field(default_factory=dict)
 
-    def to_lammps_command(self) -> str:
+    def to_lammps_command(self, fix_id: str) -> str:
         """
-        生成完整的 fix bond/create LAMMPS 命令字符串
+        生成单个 fix bond/create LAMMPS 命令字符串
+
+        Args:
+            fix_id: fix 标识符
 
         Returns:
-            str: fix bond_create_fix all bond/create Nevery itype jtype Rmin bondtype [keywords...]
+            str: fix {fix_id} all bond/create Nevery itype jtype Rmin bondtype [keywords...]
         """
         parts = [
-            "fix bond_create_fix all bond/create",
+            f"fix {fix_id} all bond/create",
             str(self.Nevery),
             str(self.itype),
             str(self.jtype),
@@ -78,9 +80,104 @@ class BondCreateConfig:
         return " ".join(parts)
 
 
+@dataclass
+class BondCreateConfig:
+    """bond/create 配置容器"""
+    pairs: List[BondCreatePair] = field(default_factory=list)
+    cg_type_map: Dict[int, int] = field(default_factory=dict)
+
+
 # ============================================================================
 # 配置加载与验证
 # ============================================================================
+
+def _parse_single_pair(data: dict, index: int) -> BondCreatePair:
+    """解析并验证单个 pair 配置"""
+    required_fields = ['itype', 'jtype', 'Nevery', 'Rmin', 'bondtype']
+    for field_name in required_fields:
+        if field_name not in data:
+            raise BondCreateConfigError(
+                f"bond_create.pairs[{index}] 缺少必填字段: '{field_name}'"
+            )
+
+    itype = int(data['itype'])
+    jtype = int(data['jtype'])
+    if itype <= 0 or jtype <= 0:
+        raise BondCreateConfigError(
+            f"pairs[{index}]: itype/jtype 必须为正整数，当前值: {itype}/{jtype}"
+        )
+
+    Nevery = int(data['Nevery'])
+    if Nevery <= 0:
+        raise BondCreateConfigError(
+            f"pairs[{index}]: Nevery 必须大于 0，当前值: {Nevery}"
+        )
+
+    Rmin = float(data['Rmin'])
+    if Rmin <= 0:
+        raise BondCreateConfigError(
+            f"pairs[{index}]: Rmin 必须大于 0，当前值: {Rmin}"
+        )
+
+    bondtype = int(data['bondtype'])
+    if bondtype <= 0:
+        raise BondCreateConfigError(
+            f"pairs[{index}]: bondtype 必须为正整数，当前值: {bondtype}"
+        )
+
+    # iparam
+    iparam = data.get('iparam', {})
+    iparam_maxbond = int(iparam.get('maxbond', 0))
+    iparam_newtype = iparam.get('newtype', None)
+    if iparam_maxbond < 0:
+        raise BondCreateConfigError(
+            f"pairs[{index}]: iparam.maxbond 不能为负数"
+        )
+    if iparam_newtype is not None:
+        iparam_newtype = int(iparam_newtype)
+        if iparam_newtype <= 0:
+            raise BondCreateConfigError(
+                f"pairs[{index}]: iparam.newtype 必须为正整数"
+            )
+
+    # jparam
+    jparam = data.get('jparam', {})
+    jparam_maxbond = int(jparam.get('maxbond', 0))
+    jparam_newtype = jparam.get('newtype', None)
+    if jparam_maxbond < 0:
+        raise BondCreateConfigError(
+            f"pairs[{index}]: jparam.maxbond 不能为负数"
+        )
+    if jparam_newtype is not None:
+        jparam_newtype = int(jparam_newtype)
+        if jparam_newtype <= 0:
+            raise BondCreateConfigError(
+                f"pairs[{index}]: jparam.newtype 必须为正整数"
+            )
+
+    # prob
+    prob = data.get('prob', {})
+    prob_fraction = float(prob.get('fraction', 1.0))
+    prob_seed = prob.get('seed', None)
+    if prob_fraction <= 0.0 or prob_fraction > 1.0:
+        raise BondCreateConfigError(
+            f"pairs[{index}]: prob.fraction 必须在 (0.0, 1.0] 范围内"
+        )
+    if prob_seed is not None:
+        prob_seed = int(prob_seed)
+        if prob_seed <= 0:
+            raise BondCreateConfigError(
+                f"pairs[{index}]: prob.seed 必须大于 0"
+            )
+
+    return BondCreatePair(
+        itype=itype, jtype=jtype,
+        Nevery=Nevery, Rmin=Rmin, bondtype=bondtype,
+        iparam_maxbond=iparam_maxbond, iparam_newtype=iparam_newtype,
+        jparam_maxbond=jparam_maxbond, jparam_newtype=jparam_newtype,
+        prob_fraction=prob_fraction, prob_seed=prob_seed,
+    )
+
 
 def load_bond_create_config(data: dict) -> BondCreateConfig:
     """
@@ -95,66 +192,16 @@ def load_bond_create_config(data: dict) -> BondCreateConfig:
     Raises:
         BondCreateConfigError: 配置验证失败
     """
-    # 必填字段验证
-    required_fields = ['Nevery', 'itype', 'jtype', 'Rmin', 'bondtype']
-    for field_name in required_fields:
-        if field_name not in data:
-            raise BondCreateConfigError(f"bond_create 缺少必填字段: '{field_name}'")
+    # 解析 pairs 列表
+    pairs_raw = data.get('pairs', [])
+    if not pairs_raw:
+        raise BondCreateConfigError("bond_create.pairs 不能为空，至少需要一个类型对")
 
-    # 数值验证
-    Nevery = int(data['Nevery'])
-    if Nevery <= 0:
-        raise BondCreateConfigError(f"Nevery 必须大于 0，当前值: {Nevery}")
+    pairs = []
+    for i, pair_data in enumerate(pairs_raw):
+        pairs.append(_parse_single_pair(pair_data, i))
 
-    itype = int(data['itype'])
-    jtype = int(data['jtype'])
-    if itype <= 0 or jtype <= 0:
-        raise BondCreateConfigError(f"itype/jtype 必须为正整数，当前值: {itype}/{jtype}")
-
-    Rmin = float(data['Rmin'])
-    if Rmin <= 0:
-        raise BondCreateConfigError(f"Rmin 必须大于 0，当前值: {Rmin}")
-
-    bondtype = int(data['bondtype'])
-    if bondtype <= 0:
-        raise BondCreateConfigError(f"bondtype 必须为正整数，当前值: {bondtype}")
-
-    # 可选字段: iparam
-    iparam = data.get('iparam', {})
-    iparam_maxbond = int(iparam.get('maxbond', 0))
-    iparam_newtype = iparam.get('newtype', None)
-    if iparam_maxbond < 0:
-        raise BondCreateConfigError(f"iparam.maxbond 不能为负数，当前值: {iparam_maxbond}")
-    if iparam_newtype is not None:
-        iparam_newtype = int(iparam_newtype)
-        if iparam_newtype <= 0:
-            raise BondCreateConfigError(f"iparam.newtype 必须为正整数，当前值: {iparam_newtype}")
-
-    # 可选字段: jparam
-    jparam = data.get('jparam', {})
-    jparam_maxbond = int(jparam.get('maxbond', 0))
-    jparam_newtype = jparam.get('newtype', None)
-    if jparam_maxbond < 0:
-        raise BondCreateConfigError(f"jparam.maxbond 不能为负数，当前值: {jparam_maxbond}")
-    if jparam_newtype is not None:
-        jparam_newtype = int(jparam_newtype)
-        if jparam_newtype <= 0:
-            raise BondCreateConfigError(f"jparam.newtype 必须为正整数，当前值: {jparam_newtype}")
-
-    # 可选字段: prob
-    prob = data.get('prob', {})
-    prob_fraction = float(prob.get('fraction', 1.0))
-    prob_seed = prob.get('seed', None)
-    if prob_fraction <= 0.0 or prob_fraction > 1.0:
-        raise BondCreateConfigError(
-            f"prob.fraction 必须在 (0.0, 1.0] 范围内，当前值: {prob_fraction}"
-        )
-    if prob_seed is not None:
-        prob_seed = int(prob_seed)
-        if prob_seed <= 0:
-            raise BondCreateConfigError(f"prob.seed 必须大于 0，当前值: {prob_seed}")
-
-    # 可选字段: cg_update.type_map
+    # 解析 cg_update.type_map
     cg_update = data.get('cg_update', {})
     cg_type_map: Dict[int, int] = {}
     raw_type_map = cg_update.get('type_map', {})
@@ -164,24 +211,12 @@ def load_bond_create_config(data: dict) -> BondCreateConfig:
             new_type = int(v)
             if old_type <= 0 or new_type <= 0:
                 raise BondCreateConfigError(
-                    f"cg_update.type_map 的 key/value 必须为正整数，当前值: {old_type} → {new_type}"
+                    f"cg_update.type_map 的 key/value 必须为正整数，"
+                    f"当前值: {old_type} → {new_type}"
                 )
             cg_type_map[old_type] = new_type
 
-    return BondCreateConfig(
-        Nevery=Nevery,
-        itype=itype,
-        jtype=jtype,
-        Rmin=Rmin,
-        bondtype=bondtype,
-        iparam_maxbond=iparam_maxbond,
-        iparam_newtype=iparam_newtype,
-        jparam_maxbond=jparam_maxbond,
-        jparam_newtype=jparam_newtype,
-        prob_fraction=prob_fraction,
-        prob_seed=prob_seed,
-        cg_type_map=cg_type_map,
-    )
+    return BondCreateConfig(pairs=pairs, cg_type_map=cg_type_map)
 
 
 # ============================================================================
@@ -205,17 +240,23 @@ def get_reaction_mode(bond_create_enabled: bool) -> str:
 # LAMMPS fix 命令生成
 # ============================================================================
 
-def generate_fix_bond_create(config: BondCreateConfig) -> str:
+def generate_fix_bond_create(config: BondCreateConfig) -> List[Tuple[str, str]]:
     """
-    生成 LAMMPS fix bond/create 命令字符串
+    生成 LAMMPS fix bond/create 命令列表（每对一个独立 fix）
 
     Args:
         config: bond/create 配置对象
 
     Returns:
-        str: 完整的 fix 命令字符串
+        List[Tuple[str, str]]: [(fix_id, cmd), ...]
+        如: [("bond_create_fix_0", "fix bond_create_fix_0 all bond/create ..."),
+              ("bond_create_fix_1", "fix bond_create_fix_1 all bond/create ...")]
     """
-    return config.to_lammps_command()
+    cmds = []
+    for i, pair in enumerate(config.pairs):
+        fix_id = f"bond_create_fix_{i}"
+        cmds.append((fix_id, pair.to_lammps_command(fix_id)))
+    return cmds
 
 
 def generate_fix_bond_react(reactions, stabilization: float) -> str:
@@ -231,7 +272,6 @@ def generate_fix_bond_react(reactions, stabilization: float) -> str:
     Returns:
         str: 完整的 fix rxns all bond/react ... 命令字符串
     """
-    # 构建反应命令
     react_cmds = []
     for rxn in reactions:
         react_cmds.append(
@@ -277,7 +317,6 @@ def update_cg_mapping_create(
     if not type_map:
         return False
 
-    # 导入依赖（延迟导入避免循环依赖）
     try:
         from .cg_bond_mapper import atom_bonds_to_cg_bonds
         from .cg_reaction_identifier import get_cg_bond_diff
@@ -285,24 +324,20 @@ def update_cg_mapping_create(
         from cg_bond_mapper import atom_bonds_to_cg_bonds
         from cg_reaction_identifier import get_cg_bond_diff
 
-    # 1. AA → CG 键转换
     cg_bonds_before = atom_bonds_to_cg_bonds(bonds_before, cg_mapping_data)
     cg_bonds_after = atom_bonds_to_cg_bonds(bonds_after, cg_mapping_data)
 
-    # 2. CG 键差集
     new_cg_bonds = get_cg_bond_diff(cg_bonds_before, cg_bonds_after)
     if not new_cg_bonds:
         return False
 
-    # 3. 收集需要更新的 bead
-    bead_type_updates: Dict[int, int] = {}
-    # 构建 bead_id → bead_type 查找表
     bead_type_lut: Dict[int, int] = {}
     for row in cg_mapping_data:
         bid = int(row[0])
         if bid > 0 and bid not in bead_type_lut:
             bead_type_lut[bid] = int(row[2])
 
+    bead_type_updates: Dict[int, int] = {}
     for b1, b2 in new_cg_bonds:
         for bead_id in (b1, b2):
             old_type = bead_type_lut.get(bead_id)
@@ -312,7 +347,6 @@ def update_cg_mapping_create(
     if not bead_type_updates:
         return False
 
-    # 4. 向量化批量更新
     for bead_id, new_type in bead_type_updates.items():
         mask = cg_mapping_data[:, 0].astype(int) == bead_id
         cg_mapping_data[mask, 2] = float(new_type)
@@ -325,103 +359,91 @@ def update_cg_mapping_create(
 # ============================================================================
 
 if __name__ == "__main__":
-    # 测试 1: 最小参数生成 bond/create 命令
     print("=" * 60)
-    print("测试 bond/create 命令生成")
+    print("测试 bond/create 多对命令生成")
     print("=" * 60)
 
-    config = BondCreateConfig(
-        Nevery=10, itype=1, jtype=2, Rmin=0.8, bondtype=1
-    )
-    cmd = generate_fix_bond_create(config)
-    expected = "fix bond_create_fix all bond/create 10 1 2 0.8 1"
-    assert cmd == expected, f"期望: {expected}\n实际: {cmd}"
-    print(f"  最小参数: {cmd}")
+    # 测试 1: 单对命令生成
+    pair1 = BondCreatePair(itype=3, jtype=5, Nevery=1, Rmin=3.79, bondtype=1)
+    cmd1 = pair1.to_lammps_command("bond_create_fix_0")
+    expected1 = "fix bond_create_fix_0 all bond/create 1 3 5 3.79 1"
+    assert cmd1 == expected1, f"期望: {expected1}\n实际: {cmd1}"
+    print(f"  单对命令: {cmd1}")
     print("  ✅ 通过")
 
-    # 测试 2: 完整参数（iparam + jparam + prob）
-    config_full = BondCreateConfig(
-        Nevery=10, itype=1, jtype=2, Rmin=0.8, bondtype=1,
-        iparam_maxbond=2, iparam_newtype=3,
-        jparam_maxbond=0,
-        prob_fraction=0.5, prob_seed=4928459
+    # 测试 2: 完整参数对（iparam + jparam + prob）
+    pair2 = BondCreatePair(
+        itype=3, jtype=6, Nevery=10, Rmin=4.0, bondtype=2,
+        iparam_maxbond=1, iparam_newtype=1,
+        jparam_maxbond=1, jparam_newtype=4,
+        prob_fraction=0.5, prob_seed=12345
     )
-    cmd_full = generate_fix_bond_create(config_full)
-    expected_full = (
-        "fix bond_create_fix all bond/create 10 1 2 0.8 1 "
-        "iparam 2 3 prob 0.5 4928459"
+    cmd2 = pair2.to_lammps_command("bond_create_fix_1")
+    expected2 = (
+        "fix bond_create_fix_1 all bond/create 10 3 6 4.0 2 "
+        "iparam 1 1 jparam 1 4 prob 0.5 12345"
     )
-    assert cmd_full == expected_full, f"期望: {expected_full}\n实际: {cmd_full}"
-    print(f"  完整参数: {cmd_full}")
+    assert cmd2 == expected2, f"期望: {expected2}\n实际: {cmd2}"
+    print(f"  完整参数: {cmd2}")
     print("  ✅ 通过")
 
-    # 测试 3: 配置验证
-    print("\n测试 bond/create 配置验证")
+    # 测试 3: 多对配置加载
+    print("\n测试多对配置加载")
+    cfg = load_bond_create_config({
+        'pairs': [
+            {'itype': 3, 'jtype': 5, 'Nevery': 1, 'Rmin': 3.79, 'bondtype': 1,
+             'iparam': {'maxbond': 1, 'newtype': 1},
+             'jparam': {'maxbond': 1, 'newtype': 3}},
+            {'itype': 3, 'jtype': 6, 'Nevery': 1, 'Rmin': 3.79, 'bondtype': 2,
+             'iparam': {'maxbond': 1, 'newtype': 1},
+             'jparam': {'maxbond': 1, 'newtype': 4}},
+            {'itype': 4, 'jtype': 5, 'Nevery': 1, 'Rmin': 3.79, 'bondtype': 2,
+             'iparam': {'maxbond': 1, 'newtype': 2},
+             'jparam': {'maxbond': 1, 'newtype': 3}},
+            {'itype': 4, 'jtype': 6, 'Nevery': 1, 'Rmin': 3.79, 'bondtype': 3,
+             'iparam': {'maxbond': 1, 'newtype': 2},
+             'jparam': {'maxbond': 1, 'newtype': 4}},
+        ],
+        'cg_update': {'type_map': {3: 1, 4: 2, 5: 3, 6: 4}}
+    })
+    assert len(cfg.pairs) == 4, f"期望 4 对，实际 {len(cfg.pairs)}"
+    assert cfg.cg_type_map == {3: 1, 4: 2, 5: 3, 6: 4}
+    print(f"  pairs 数: {len(cfg.pairs)}")
+    print(f"  type_map: {cfg.cg_type_map}")
+    print("  ✅ 通过")
+
+    # 测试 4: generate_fix_bond_create 返回多对
+    cmds = generate_fix_bond_create(cfg)
+    assert len(cmds) == 4, f"期望 4 条命令，实际 {len(cmds)}"
+    for fix_id, cmd in cmds:
+        print(f"  {fix_id}: {cmd}")
+    assert cmds[0][0] == "bond_create_fix_0"
+    assert cmds[1][0] == "bond_create_fix_1"
+    assert cmds[2][0] == "bond_create_fix_2"
+    assert cmds[3][0] == "bond_create_fix_3"
+    assert "bond/create 1 3 5 3.79 1 iparam 1 1 jparam 1 3" in cmds[0][1]
+    assert "bond/create 1 3 6 3.79 2 iparam 1 1 jparam 1 4" in cmds[1][1]
+    assert "bond/create 1 4 5 3.79 2 iparam 1 2 jparam 1 3" in cmds[2][1]
+    assert "bond/create 1 4 6 3.79 3 iparam 1 2 jparam 1 4" in cmds[3][1]
+    print("  ✅ 4 对命令验证通过")
+
+    # 测试 5: 验证
+    print("\n测试配置验证")
     try:
-        load_bond_create_config({})  # 缺少必填字段
+        load_bond_create_config({'pairs': []})
         assert False, "应该抛出异常"
     except BondCreateConfigError as e:
-        print(f"  缺少必填字段报错: {e}")
+        print(f"  空 pairs 报错: {e}")
         print("  ✅ 通过")
 
     try:
-        load_bond_create_config({
-            'Nevery': 10, 'itype': 1, 'jtype': 2, 'Rmin': -0.5, 'bondtype': 1
-        })
+        load_bond_create_config({'pairs': [
+            {'itype': 3, 'jtype': 5, 'Nevery': -1, 'Rmin': 3.79, 'bondtype': 1}
+        ]})
         assert False, "应该抛出异常"
     except BondCreateConfigError as e:
-        print(f"  Rmin<=0 报错: {e}")
+        print(f"  Nevery<=0 报错: {e}")
         print("  ✅ 通过")
-
-    try:
-        load_bond_create_config({
-            'Nevery': 10, 'itype': 1, 'jtype': 2, 'Rmin': 0.8, 'bondtype': 1,
-            'prob': {'fraction': 1.5, 'seed': 123}
-        })
-        assert False, "应该抛出异常"
-    except BondCreateConfigError as e:
-        print(f"  prob.fraction 越界报错: {e}")
-        print("  ✅ 通过")
-
-    # 测试 4: update_cg_mapping_create
-    print("\n测试 CG 映射更新 (bond/create)")
-    cg_mapping = np.array([
-        [1, 1, 3, 1, 10.0],   # bead 1, type 3
-        [2, 1, 5, 2, 10.0],   # bead 2, type 5
-        [3, 2, 3, 3, 10.0],   # bead 3, type 3
-        [4, 2, 5, 4, 10.0],   # bead 4, type 5
-    ], dtype=np.float32)
-
-    bonds_before = np.array([
-        [1, 1, 2],  # bead1-bead2 (type 3-5)
-    ], dtype=np.int32)
-
-    bonds_after = np.array([
-        [1, 1, 2],
-        [1, 3, 4],  # bead3-bead4 新键 (type 3-5)
-    ], dtype=np.int32)
-
-    type_map = {3: 1, 5: 3}  # type 3→1, type 5→3
-
-    updated = update_cg_mapping_create(cg_mapping, bonds_before, bonds_after, type_map)
-    assert updated, "应该有更新"
-    # 验证 bead 3 (type 3 → 1)
-    mask3 = cg_mapping[:, 0].astype(int) == 3
-    assert cg_mapping[mask3, 2][0] == 1.0, f"bead 3 type 应该变成 1，实际: {cg_mapping[mask3, 2]}"
-    # 验证 bead 4 (type 5 → 3)
-    mask4 = cg_mapping[:, 0].astype(int) == 4
-    assert cg_mapping[mask4, 2][0] == 3.0, f"bead 4 type 应该变成 3，实际: {cg_mapping[mask4, 2]}"
-    print("  ✅ 通过")
-
-    # 测试 5: 空 type_map 不更新
-    cg_mapping2 = np.array([
-        [1, 1, 1, 1, 10.0],
-        [2, 1, 2, 2, 10.0],
-    ], dtype=np.float32)
-    bonds2 = np.array([[1, 1, 2]], dtype=np.int32)
-    updated2 = update_cg_mapping_create(cg_mapping2, bonds2, bonds2, {})
-    assert not updated2, "空 type_map 应该返回 False"
-    print("  ✅ 空 type_map 测试通过")
 
     print("\n" + "=" * 60)
     print("所有测试通过")

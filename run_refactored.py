@@ -765,11 +765,12 @@ class LAMMPSReactionRunner:
         lmp.command(f"run {params.bond_react_check_step}")
 
     def _run_bond_create(self, lmp, params):
-        """运行 fix bond/create"""
+        """运行 fix bond/create (支持多对)"""
         from core.reaction_commands import generate_fix_bond_create
 
-        cmd = generate_fix_bond_create(self.bond_create_config)
-        lmp.command(cmd)
+        cmds = generate_fix_bond_create(self.bond_create_config)
+        for fix_id, cmd in cmds:
+            lmp.command(cmd)
         lmp.command(self._get_ensemble_fix(params, "all", "create_ensemble"))
         lmp.command("thermo_style custom step temp press density")
         lmp.command(f"run {params.bond_react_check_step}")
@@ -810,8 +811,9 @@ class LAMMPSReactionRunner:
 
         策略: 全局 NVE/limit（吸收键能冲击）→ 全局系综（NVT 或 NPT）
         """
-        # 0. 关闭 bond/create 阶段的 fix
-        lmp.command("unfix bond_create_fix")
+        # 0. 关闭所有 bond/create fix
+        for i in range(len(self.bond_create_config.pairs)):
+            lmp.command(f"unfix bond_create_fix_{i}")
         lmp.command("unfix create_ensemble")
         lmp.command("thermo_style custom step temp press density")
 
@@ -831,12 +833,14 @@ class LAMMPSReactionRunner:
         react_nums = {}
 
         if self.reaction_mode == "bond/create":
-            # bond/create 的 fix 输出全局向量 [本步创建数, 累计创建数]
-            try:
-                num = lmp.extract_fix("bond_create_fix", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR, nrow=0)
-                react_nums[f"bond_create_type{self.bond_create_config.bondtype}"] = int(num) if num else 0
-            except Exception:
-                react_nums["bond_create"] = 0
+            # bond/create: 遍历所有 pairs 提取各自计数
+            for i, pair in enumerate(self.bond_create_config.pairs):
+                key = f"{pair.itype}-{pair.jtype}"
+                try:
+                    num = lmp.extract_fix(f"bond_create_fix_{i}", LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR, nrow=0)
+                    react_nums[key] = int(num) if num else 0
+                except Exception:
+                    react_nums[key] = 0
         else:
             # bond/react 原有逻辑
             for i, rxn in enumerate(self.lammps_params.reactions):
