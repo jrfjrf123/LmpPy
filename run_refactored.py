@@ -297,7 +297,7 @@ class LAMMPSReactionRunner:
 
             # Step 1: 运行反应步骤（按模式分支）
             if self.reaction_mode == "bond/create":
-                self._run_bond_create(lmp, params)
+                react_nums = self._run_bond_create(lmp, params)
             else:
                 self._run_bond_react(lmp, params)
 
@@ -307,8 +307,9 @@ class LAMMPSReactionRunner:
                 timestep = lmp.extract_global("ntimestep")
                 box = get_lmp_box_info(lmp)
 
-                # 检测反应
-                react_nums = self._get_react_num(lmp)
+                # 检测反应（bond/react 模式提取计数，bond/create 已在 Step 1 返回）
+                if self.reaction_mode != "bond/create":
+                    react_nums = self._get_react_num(lmp)
 
                 # 写入反应计数
                 react_str = " ".join(str(v) for v in react_nums.values())
@@ -785,17 +786,27 @@ class LAMMPSReactionRunner:
         lmp.command(f"run {params.bond_react_check_step}")
 
     def _run_bond_create(self, lmp, params):
-        """顺序执行每个 bond/create pair，避免多 fix 冲突"""
+        """顺序执行每个 bond/create pair，避免多 fix 冲突。返回各对反应计数"""
         from core.reaction_commands import generate_fix_bond_create
 
+        react_nums = {}
         cmds = generate_fix_bond_create(self.bond_create_config)
-        for fix_id, cmd in cmds:
+        for i, (fix_id, cmd) in enumerate(cmds):
             lmp.command(cmd)
             lmp.command(self._get_ensemble_fix(params, "all", "create_ensemble"))
             lmp.command("thermo_style custom step temp press density")
             lmp.command("run 1")
+            # 在 unfix 之前提取计数
+            pair = self.bond_create_config.pairs[i]
+            key = f"{pair.itype}-{pair.jtype}"
+            try:
+                num = lmp.extract_fix(fix_id, LMP_STYLE_GLOBAL, LMP_TYPE_VECTOR, nrow=0)
+                react_nums[key] = int(num) if num else 0
+            except Exception:
+                react_nums[key] = 0
             lmp.command(f"unfix {fix_id}")
             lmp.command("unfix create_ensemble")
+        return react_nums
 
     def _run_relaxation(self, lmp, params: LAMMPSParams):
         """运行松弛阶段"""
