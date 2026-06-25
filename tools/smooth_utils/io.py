@@ -182,4 +182,11 @@ def convert_distribution_units(
                          f"支持的单位: {list(factor_map.keys())}")
 
     scale = factor_map[from_unit] / factor_map[to_unit]
-    return x * scale, P / scale
+    x_new = x * scale
+    if dist_type == 'rdf':
+        # RDF g(r) 为无量纲量，单位转换时不应缩放其数值
+        P_new = P.copy()
+    else:
+        # bond/angle/dihedral 概率密度需保持 ∫P(x)dx 守恒
+        P_new = P / scale
+    return x_new, P_new

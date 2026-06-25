@@ -12,6 +12,10 @@ AA到CG转换工具 CLI
     # 转换data文件（自动推导拓扑）
     python -m LmpPy.scripts.convert_aa2cg data --input system.data --mapping mapping.csv --derive-topology --output-cg-topology .
 
+    # 转换data文件（自动推导拓扑 + YAML类型映射）
+    python -m LmpPy.scripts.convert_aa2cg data --input system.data --mapping mapping.csv \\
+        --derive-topology --type-mapping type_mapping.yaml
+
     # 转换data文件并输出XYZ（unwrap格式）
     python -m LmpPy.scripts.convert_aa2cg data --input system.data --mapping mapping.csv --xyz
 
@@ -217,7 +221,8 @@ def cmd_convert_data(args):
         aa_data, args.mapping,
         args.bonds, args.angles, args.dihedrals,
         derive_topology=args.derive_topology,
-        output_cg_topology_dir=args.output_cg_topology
+        output_cg_topology_dir=args.output_cg_topology,
+        type_mapping_yaml=args.type_mapping
     )
     print(f"  Beads: {cg_data['natoms']}")
 
@@ -369,7 +374,8 @@ def cmd_convert_gro(args):
         aa_data, args.mapping,
         None, None, None,  # 不提供预计算拓扑文件
         derive_topology=args.derive_topology,
-        output_cg_topology_dir=args.output_cg_topology
+        output_cg_topology_dir=args.output_cg_topology,
+        type_mapping_yaml=args.type_mapping
     )
     print(f"  Beads: {cg_data['natoms']}")
 
@@ -451,6 +457,9 @@ def main():
                                   'cg_dihedrals.txt, cg_bead_info.txt）')
     data_parser.add_argument('--xyz', action='store_true',
                              help='输出单帧XYZ文件：AA_unwrap.xyz（解缠坐标）和CG.xyz')
+    data_parser.add_argument('--type-mapping', metavar='YAML',
+                             help='YAML 文件路径，bead type 组合 → 拓扑类型映射表'
+                                  '（仅 --derive-topology 模式下生效）')
 
     # GRO文件转换子命令
     gro_parser = subparsers.add_parser('gro', help='GRO结构文件转换（需TPR拓扑）')
@@ -465,6 +474,9 @@ def main():
                                  'cg_dihedrals.txt, cg_bead_info.txt）')
     gro_parser.add_argument('--xyz', action='store_true',
                             help='输出XYZ文件：AA_unwrap.xyz（解缠坐标）和CG.xyz')
+    gro_parser.add_argument('--type-mapping', metavar='YAML',
+                            help='YAML 文件路径，bead type 组合 → 拓扑类型映射表'
+                                 '（仅 --derive-topology 模式下生效）')
 
     args = parser.parse_args()
 

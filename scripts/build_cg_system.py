@@ -36,7 +36,20 @@ import numpy as np
 
 # 复用 cg_topology 中的拓扑推导逻辑
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from LmpPy.core.cg_topology import derive_cg_topology_from_bonds
+from LmpPy.core.cg_topology import (
+    derive_cg_topology_from_bonds,
+    derive_angles_from_bonds,
+    derive_dihedrals_from_bonds,
+    CGTopology,
+)
+
+# YAML 配置解析模块
+from LmpPy.scripts.build_cg_config import (
+    BuildCGConfig,
+    read_bonds as _read_bonds_new,
+    read_angles,
+    read_dihedrals,
+)
 
 
 def parse_gro(filepath):
@@ -94,31 +107,10 @@ def read_bonds(filepath):
     """
     读取 bonds 文件。支持 3 列 (bond_type atom1 atom2) 或 4 列 (bond_id bond_type atom1 atom2)。
     若文件为空或不存在，返回空数组（单 bead 分子）。
+
+    (委托给 build_cg_config.read_bonds)
     """
-    if not filepath or not Path(filepath).exists():
-        return np.array([], dtype=np.int32).reshape(0, 3)
-
-    content = Path(filepath).read_text().strip()
-    if not content:
-        return np.array([], dtype=np.int32).reshape(0, 3)
-
-    rows = []
-    for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split()
-        if len(parts) == 3:
-            bond_type, a1, a2 = int(parts[0]), int(parts[1]), int(parts[2])
-        elif len(parts) == 4:
-            _, bond_type, a1, a2 = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
-        else:
-            continue
-        rows.append([bond_type, a1, a2])
-
-    if not rows:
-        return np.array([], dtype=np.int32).reshape(0, 3)
-    return np.array(rows, dtype=np.int32)
+    return _read_bonds_new(filepath)
 
 
 def parse_mol_spec(spec_str):
@@ -166,7 +158,8 @@ def parse_masses(masses_str):
     return masses
 
 
-def build_system(mol_specs, type_specs, masses_dict, gro_path, output_path):
+def build_system(mol_specs, type_specs, masses_dict, gro_path, output_path,
+                 mol_angles_list=None, mol_dihedrals_list=None):
     """
     构建完整体系并输出 LAMMPS .data 文件。
 
@@ -229,19 +222,38 @@ def build_system(mol_specs, type_specs, masses_dict, gro_path, output_path):
 
     # 5. 复制拓扑 N 次
     all_bonds = []
+    all_angles = []
+    all_dihedrals = []
     atom_rows = []
     gro_idx = 0
+    global_mol_id = 1          # 跨分子类型的全局分子编号
+    global_atom_offset = 0     # 跨分子类型的全局原子偏移量
 
-    for mol_info in mol_topologies:
+    for mol_idx_global, mol_info in enumerate(mol_topologies):
         name = mol_info["name"]
         mol_bonds = mol_info["bonds"]
         count = mol_info["count"]
         beads_per_mol = mol_info["beads_per_mol"]
         atom_types = type_specs.get(name, None)
 
+        # 获取预读取的 angles / dihedrals（YAML 模式传入）
+        mol_angles = (mol_angles_list[mol_idx_global]
+                      if mol_angles_list and mol_idx_global < len(mol_angles_list)
+                      else np.array([], dtype=np.int32).reshape(0, 4))
+        mol_dihedrals = (mol_dihedrals_list[mol_idx_global]
+                         if mol_dihedrals_list and mol_idx_global < len(mol_dihedrals_list)
+                         else np.array([], dtype=np.int32).reshape(0, 5))
+
+        # 逐分子兜底推导：未显式指定的从该分子 bonds 自动推导
+        if len(mol_angles) == 0 and len(mol_bonds) > 0:
+            mol_angles = derive_angles_from_bonds(mol_bonds)
+        if len(mol_dihedrals) == 0 and len(mol_bonds) > 0:
+            mol_dihedrals = derive_dihedrals_from_bonds(mol_bonds)
+
         for mol_idx in range(count):
-            mol_id = mol_idx + 1
-            atom_offset = mol_idx * beads_per_mol
+            mol_id = global_mol_id
+            atom_offset = global_atom_offset + mol_idx * beads_per_mol
+            global_mol_id += 1
 
             for local_idx in range(beads_per_mol):
                 global_atom_id = gro_idx + 1
@@ -262,16 +274,42 @@ def build_system(mol_specs, type_specs, masses_dict, gro_path, output_path):
                 atom_rows.append([global_atom_id, mol_id, atom_type, x, y, z])
                 gro_idx += 1
 
+            # 复制 bonds
             for bond in mol_bonds:
                 all_bonds.append([bond[0], bond[1] + atom_offset, bond[2] + atom_offset])
+
+            # 复制 angles
+            for angle in mol_angles:
+                all_angles.append([angle[0], angle[1] + atom_offset,
+                                   angle[2] + atom_offset, angle[3] + atom_offset])
+
+            # 复制 dihedrals
+            for dihedral in mol_dihedrals:
+                all_dihedrals.append([dihedral[0], dihedral[1] + atom_offset,
+                                      dihedral[2] + atom_offset, dihedral[3] + atom_offset,
+                                      dihedral[4] + atom_offset])
+
+        # 当前分子类型处理完毕，累加全局原子偏移量
+        global_atom_offset += count * beads_per_mol
 
     if all_bonds:
         all_bonds = np.array(all_bonds, dtype=np.int32)
     else:
         all_bonds = np.array([], dtype=np.int32).reshape(0, 3)
 
-    # 6. 推导 angles 和 dihedrals
-    topology = derive_cg_topology_from_bonds(all_bonds)
+    if all_angles:
+        all_angles = np.array(all_angles, dtype=np.int32)
+    else:
+        all_angles = np.array([], dtype=np.int32).reshape(0, 4)
+
+    if all_dihedrals:
+        all_dihedrals = np.array(all_dihedrals, dtype=np.int32)
+    else:
+        all_dihedrals = np.array([], dtype=np.int32).reshape(0, 5)
+
+    # 6. 组装拓扑（angles/dihedrals 已在逐分子循环中推导完成）
+    topology = CGTopology(bonds=all_bonds, angles=all_angles, dihedrals=all_dihedrals)
+
     print(f"总 bonds: {topology.n_bonds}, angles: {topology.n_angles}, dihedrals: {topology.n_dihedrals}")
 
     # 7. 写 data 文件
@@ -342,22 +380,93 @@ def build_system(mol_specs, type_specs, masses_dict, gro_path, output_path):
     print(f"已写入 {output_path}")
 
 
+def build_system_from_config(config: BuildCGConfig, output_path: str):
+    """
+    从 BuildCGConfig 对象构建体系（YAML 模式入口）。
+
+    Args:
+        config: BuildCGConfig 实例（已通过 validate() 校验）
+        output_path: 输出 .data 文件路径
+    """
+    # 读取每种分子的拓扑文件
+    mol_specs = []           # list of (name, bonds_file, count)，兼容 build_system
+    mol_angles_list = []     # 每个分子预读取的 angles
+    mol_dihedrals_list = []  # 每个分子预读取的 dihedrals
+
+    for mol in config.molecules:
+        # 读取 bonds
+        mol_bonds = read_bonds(mol.bonds_file)
+
+        # 使用 dataclass 中已推断的 beads_per_mol
+        beads_per_mol = mol.beads_per_mol
+        n_atoms_type = beads_per_mol * mol.count
+
+        mol_specs.append((mol.name, mol.bonds_file, mol.count))
+
+        # 读取 angles（指定文件则读取，未指定则空数组 → 后续自动推导）
+        mol_angles = read_angles(mol.angles_file)
+        mol_angles_list.append(mol_angles)
+
+        # 读取 dihedrals（指定文件则读取，未指定则空数组 → 后续自动推导）
+        mol_dihedrals = read_dihedrals(mol.dihedrals_file)
+        mol_dihedrals_list.append(mol_dihedrals)
+
+        print(f"分子 {mol.name}: bonds={len(mol_bonds)}, "
+              f"angles={len(mol_angles)}{' (指定文件)' if mol.angles_file else ' (自动推导)'}, "
+              f"dihedrals={len(mol_dihedrals)}{' (指定文件)' if mol.dihedrals_file else ' (自动推导)'}, "
+              f"beads/mol={beads_per_mol}, count={mol.count}, total_atoms={n_atoms_type}")
+
+    # 调用 build_system
+    build_system(
+        mol_specs=mol_specs,
+        type_specs=config.types,
+        masses_dict=config.masses,
+        gro_path=config.gro,
+        output_path=output_path,
+        mol_angles_list=mol_angles_list,
+        mol_dihedrals_list=mol_dihedrals_list,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="根据单分子拓扑和分子数量构建完整多分子体系的 LAMMPS .data 文件"
     )
+
+    # 两种模式（互斥）
     parser.add_argument(
-        "--mol", action="append", required=True,
-        help="分子规格: name:bonds_file:count (bonds_file 为空表示单 bead 分子)"
+        "--yaml", default=None,
+        help="YAML 配置文件路径（与 --mol 互斥，包含所有构建参数）"
     )
+    parser.add_argument(
+        "--mol", action="append", default=None,
+        help="分子规格: name:bonds_file:count (与 --yaml 互斥)"
+    )
+
+    # 命令行模式的辅助参数
     parser.add_argument(
         "--types", action="append", default=[],
         help="分子 bead 类型: name:type1,type2,... (不提供 GRO 时必需)"
     )
-    parser.add_argument("--masses", required=True, help="原子类型质量，如 '1:12.01,2:12.01,3:12.01'")
+    parser.add_argument("--masses", default=None, help="原子类型质量，如 '1:12.01,2:12.01,3:12.01'")
     parser.add_argument("--gro", default=None, help="GRO 文件路径（提供坐标和类型，可选）")
     parser.add_argument("-o", "--output", required=True, help="输出 LAMMPS .data 文件路径")
     args = parser.parse_args()
+
+    # --- 互斥检查 ---
+    if args.yaml and args.mol:
+        parser.error("--yaml 与 --mol 不能同时使用，请选择一种模式")
+
+    # --- YAML 模式 ---
+    if args.yaml:
+        config = BuildCGConfig.from_yaml(args.yaml)
+        output = args.output  # 命令行 -o 优先于 YAML 中的 output
+        build_system_from_config(config, output)
+        return
+
+    # --- 命令行模式（原有逻辑，完全不变）---
+    if not args.mol:
+        parser.error("必须提供 --mol 或 --yaml 参数")
 
     mol_specs = [parse_mol_spec(s) for s in args.mol]
     type_specs = {}

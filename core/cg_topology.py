@@ -20,7 +20,8 @@ import numpy as np
 
 def _assign_topology_types_local(topology_array: np.ndarray,
                                   bead_types: Dict[int, int],
-                                  topology_kind: str) -> np.ndarray:
+                                  topology_kind: str,
+                                  type_mapping: Optional[Dict[Tuple, int]] = None) -> np.ndarray:
     """
     根据 bead type 组合分配拓扑类型 ID（本地辅助函数）。
 
@@ -32,6 +33,8 @@ def _assign_topology_types_local(topology_array: np.ndarray,
         topology_array: 拓扑数组 [type, bead1, bead2, ...]
         bead_types: {bead_id: bead_type}
         topology_kind: 'bond', 'angle', 'dihedral'
+        type_mapping: YAML 提供的组合→类型ID预填表（规范化后的组合为key），
+                      未列出的组合自动分配ID，从 max(yaml_types)+1 开始
 
     Returns:
         更新 type 列后的拓扑数组
@@ -41,7 +44,14 @@ def _assign_topology_types_local(topology_array: np.ndarray,
 
     # 收集所有 bead type 组合
     type_combinations = {}
-    next_type_id = 1
+
+    # 预填充：YAML 中的组合优先占据类型 ID
+    if type_mapping:
+        for combo, tid in type_mapping.items():
+            type_combinations[combo] = tid
+        next_type_id = max(type_mapping.values()) + 1
+    else:
+        next_type_id = 1
 
     for topo in topology_array:
         bead_ids = topo[1:]  # 获取 bead IDs
@@ -64,7 +74,7 @@ def _assign_topology_types_local(topology_array: np.ndarray,
             if bead_type_combo > reversed_combo:
                 bead_type_combo = reversed_combo
 
-        # 分配 type ID
+        # 分配 type ID（查表优先，预填充的组合已存在）
         if bead_type_combo not in type_combinations:
             type_combinations[bead_type_combo] = next_type_id
             next_type_id += 1
@@ -114,7 +124,8 @@ class CGTopology:
 
 def derive_angles_from_bonds(cg_bonds: np.ndarray,
                              bead_types: Optional[Dict[int, int]] = None,
-                             default_angle_type: int = 1) -> np.ndarray:
+                             default_angle_type: int = 1,
+                             type_mapping: Optional[Dict[Tuple, int]] = None) -> np.ndarray:
     """
     从键列表推导角度列表，并根据 bead type 分配 angle type。
 
@@ -124,6 +135,7 @@ def derive_angles_from_bonds(cg_bonds: np.ndarray,
         cg_bonds: CG键数组 (n_bonds, 3) [bond_type, bead1, bead2]
         bead_types: {bead_id: bead_type} 映射（可选，用于分配正确的 angle type）
         default_angle_type: 默认角度类型（当 bead_types 未提供时使用）
+        type_mapping: YAML 提供的 angle 组合→类型ID预填表
 
     Returns:
         angles: 角度数组 (n_angles, 4) [angle_type, bead1, bead2, bead3]
@@ -167,14 +179,16 @@ def derive_angles_from_bonds(cg_bonds: np.ndarray,
 
     # 根据 bead_types 分配正确的 angle type
     if bead_types and len(angles) > 0:
-        angles = _assign_topology_types_local(angles, bead_types, 'angle')
+        angles = _assign_topology_types_local(angles, bead_types, 'angle',
+                                               type_mapping=type_mapping)
 
     return angles
 
 
 def derive_dihedrals_from_bonds(cg_bonds: np.ndarray,
                                 bead_types: Optional[Dict[int, int]] = None,
-                                default_dihedral_type: int = 1) -> np.ndarray:
+                                default_dihedral_type: int = 1,
+                                type_mapping: Optional[Dict[Tuple, int]] = None) -> np.ndarray:
     """
     从键列表推导二面角列表，并根据 bead type 分配 dihedral type。
 
@@ -184,6 +198,7 @@ def derive_dihedrals_from_bonds(cg_bonds: np.ndarray,
         cg_bonds: CG键数组 (n_bonds, 3) [bond_type, bead1, bead2]
         bead_types: {bead_id: bead_type} 映射（可选，用于分配正确的 dihedral type）
         default_dihedral_type: 默认二面角类型（当 bead_types 未提供时使用）
+        type_mapping: YAML 提供的 dihedral 组合→类型ID预填表
 
     Returns:
         dihedrals: 二面角数组 (n_dihedrals, 5) [dihedral_type, bead1, bead2, bead3, bead4]
@@ -229,7 +244,8 @@ def derive_dihedrals_from_bonds(cg_bonds: np.ndarray,
 
     # 根据 bead_types 分配正确的 dihedral type
     if bead_types and len(dihedrals) > 0:
-        dihedrals = _assign_topology_types_local(dihedrals, bead_types, 'dihedral')
+        dihedrals = _assign_topology_types_local(dihedrals, bead_types, 'dihedral',
+                                                  type_mapping=type_mapping)
 
     return dihedrals
 
@@ -309,7 +325,9 @@ def verify_molecule_ids_consistency(cg_compare_list: np.ndarray,
 def derive_cg_topology_from_bonds(cg_bonds: np.ndarray,
                                   bead_types: Optional[Dict[int, int]] = None,
                                   default_angle_type: int = 1,
-                                  default_dihedral_type: int = 1) -> CGTopology:
+                                  default_dihedral_type: int = 1,
+                                  angle_type_mapping: Optional[Dict[Tuple, int]] = None,
+                                  dihedral_type_mapping: Optional[Dict[Tuple, int]] = None) -> CGTopology:
     """
     从 CG 键推导完整的 CG 拓扑
 
@@ -318,12 +336,16 @@ def derive_cg_topology_from_bonds(cg_bonds: np.ndarray,
         bead_types: {bead_id: bead_type} 映射（可选，用于分配正确的拓扑类型）
         default_angle_type: 默认角度类型（当 bead_types 未提供时使用）
         default_dihedral_type: 默认二面角类型（当 bead_types 未提供时使用）
+        angle_type_mapping: YAML 提供的 angle 组合→类型ID预填表
+        dihedral_type_mapping: YAML 提供的 dihedral 组合→类型ID预填表
 
     Returns:
         CGTopology: 完整的 CG 拓扑
     """
-    angles = derive_angles_from_bonds(cg_bonds, bead_types, default_angle_type)
-    dihedrals = derive_dihedrals_from_bonds(cg_bonds, bead_types, default_dihedral_type)
+    angles = derive_angles_from_bonds(cg_bonds, bead_types, default_angle_type,
+                                       type_mapping=angle_type_mapping)
+    dihedrals = derive_dihedrals_from_bonds(cg_bonds, bead_types, default_dihedral_type,
+                                             type_mapping=dihedral_type_mapping)
 
     return CGTopology(bonds=cg_bonds, angles=angles, dihedrals=dihedrals)
 

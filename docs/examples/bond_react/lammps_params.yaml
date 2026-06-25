@@ -1,0 +1,93 @@
+# =============================================================================
+# lammps_params.yaml — bond/react 模式 LAMMPS 参数示例 (EPR 体系)
+# =============================================================================
+# 本文件定义 bond/react 模式下的完整 LAMMPS 运行参数。
+# 包含一个示例反应配置（rxn1），适用于环氧树脂聚合体系。
+#
+# 使用说明:
+#   - 此配置需配合 system.yaml 和 reactions/ 目录下的模板文件使用
+#   - 反应模板文件位于 config/reactions/{name}/ 子目录
+# =============================================================================
+
+# =============================================================================
+# 模拟基本参数
+# =============================================================================
+simulation:
+  loop_num: 25               # 主循环次数（总模拟时间 = loop_num * run_per_loop * dt）
+  dt: 0.001                  # 时间步长 (ps)
+  timestep: 1                # LAMMPS timestep 设置 (fs)
+  temperature: 400           # 目标温度 (K)
+  pressure: 1.0              # 目标压力 (atm)，仅 ensemble=npt 时有效
+  ensemble: "nvt"            # 系综类型: "npt" 或 "nvt"
+
+# =============================================================================
+# 步数配置
+# =============================================================================
+steps:
+  bond_react_check: 1        # 键反应检查步数（每个 loop 中执行检查分配的步数）
+  run_per_loop: 100          # 每个 loop 运行总步数
+  nve_limit: 50              # NVE/limit 步数（反应原子弛豫）
+  # 注意: run_per_loop > nve_limit + bond_react_check
+  # normal_npt_step = run_per_loop - nve_limit - bond_react_check
+
+# =============================================================================
+# NPT 控温控压参数
+# =============================================================================
+npt:
+  tcouple: 100               # 温度耦合常数 (fs)
+  pcouple: 1000              # 压力耦合常数 (fs)，仅 ensemble=npt 时生效
+
+# =============================================================================
+# Bond/React 配置
+# =============================================================================
+bond_react:
+  # bond/react stabilization 参数 (Angstrom)
+  # 控制反应发生时原子位置的稳定化范围
+  stabilization: 0.05
+
+  # 反应定义列表
+  reactions:
+    - name: "rxn1"           # 反应名称（必须与 reactions/{name}/ 子目录同名）
+      cutoff: 3.0            # 反应截断半径 (Angstrom)
+      map_file: "rxn1.map"   # bond/react map 文件（程序自动在 reactions/{name}/ 下查找）
+      pre_mol: "mol1"        # 反应前分子模板名（对应 molecules 配置块中的键）
+      post_mol: "mol2"       # 反应后分子模板名
+      pre_template: "rxn1_pre.lammpstemplate"    # 反应前模板文件
+      post_template: "rxn1_post.lammpstemplate"   # 反应后模板文件
+      pre_mapping: "rxn1_pre_mapping.yaml"        # 反应前 CG 映射（可选，推荐提供）
+      post_mapping: "rxn1_post_mapping.yaml"      # 反应后 CG 映射（可选，推荐提供）
+
+# =============================================================================
+# 分子模板配置
+# =============================================================================
+# 键: 模板名称（与 bond_react.reactions 中的 pre_mol/post_mol 对应）
+# 值: 模板文件路径（相对于配置目录）
+molecules:
+  mol1: "reactions/rxn1/rxn1_pre.lammpstemplate"
+  mol2: "reactions/rxn1/rxn1_post.lammpstemplate"
+
+# =============================================================================
+# 输入输出文件配置
+# =============================================================================
+files:
+  # --- 输入文件 ---
+  data_file: "modify_EPR_poly.data"             # LAMMPS 初始数据文件
+  initial_cg_mapping: "final_cg_compare_list.csv"  # 初始 CG 映射（支持断点续算加载）
+
+  # read_data 额外参数（预分配内存，反应体系需保守设置）
+  read_data_extra:
+    special_per_atom: 6    # 每原子特殊邻居数
+    bond_per_atom: 5       # 每原子最大键数
+    angle_per_atom: 9      # 每原子最大角数
+    dihedral_per_atom: 8   # 每原子最大二面角数
+
+  # --- 输出文件 ---
+  output_cg_trajectory: "cg_trajectory.lammpstrj"   # CG 轨迹（LAMMPS dump 格式）
+  output_reaction_count: "reaction_num.txt"          # 反应计数
+  output_final_data: "final_frame.data"              # 最终帧（断点续算用）
+  output_final_mapping: "final_cg_compare_list.csv"  # 最终 CG 映射
+
+  # CG 拓扑输出
+  output_cg_bonds: "cg_bonds.txt"         # CG 键
+  output_cg_angles: "cg_angles.txt"       # CG 角度
+  output_cg_dihedrals: "cg_dihedrals.txt" # CG 二面角

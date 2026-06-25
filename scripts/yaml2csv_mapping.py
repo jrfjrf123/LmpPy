@@ -213,7 +213,7 @@ if __name__ == "__main__":
     # 硬编码的自定义 bead type 映射
     # 根据需要修改此字典
     # ========================================
-
+    """
     # PIP custom bead type mapping:
     CUSTOM_BEAD_TYPE_MAP = {
     "Bead1": 1,    # chain_bead
@@ -228,14 +228,14 @@ if __name__ == "__main__":
     CUSTOM_BEAD_TYPE_MAP = {
     "Bead1": 1,    # chain E
     "Bead2": 2,    # chain P
-    "Bead3": 3,    # chain reactor E
-    "Bead4": 4,    # chain reactor P 
-    "Bead5": 5,    # E
-    "Bead6": 6,    # P
+    "Bead3": 1,    # chain reactor E
+    "Bead4": 2,    # chain reactor P 
+    "Bead5": 3,    # E
+    "Bead6": 4,    # P
     "Bead7": 1,    # chain head E
-    "Bead6": 2     # chain head P
+    "Bead8": 2     # chain head P
     }
-    """
+    
     # Select bead type map
     custom_bead_type_map = CUSTOM_BEAD_TYPE_MAP if args.custom else None
 

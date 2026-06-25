@@ -20,6 +20,13 @@ try:
 except ImportError:
     HAS_MDA = False
 
+# 尝试导入PyYAML（可选依赖）
+try:
+    import yaml
+    HAS_YAML = True
+except ImportError:
+    HAS_YAML = False
+
 from .mapping_utils import (
     load_aa_to_cg_mapping,
     convert_aa_to_cg_frame,
@@ -227,7 +234,10 @@ def write_cg_data_file(filename: str, cg_data: Dict, cg_bonds: np.ndarray = None
     print(f"  Dihedrals: {n_dihedrals}")
 
 
-def derive_cg_topology(aa_data: Dict, mapping_csv: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def derive_cg_topology(aa_data: Dict, mapping_csv: str,
+                       bond_mapping: Optional[Dict[Tuple, int]] = None,
+                       angle_mapping: Optional[Dict[Tuple, int]] = None,
+                       dihedral_mapping: Optional[Dict[Tuple, int]] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     从 AA data + mapping CSV 自动推导 CG bonds/angles/dihedrals。
 
@@ -238,6 +248,9 @@ def derive_cg_topology(aa_data: Dict, mapping_csv: str) -> Tuple[np.ndarray, np.
     Args:
         aa_data: 从read_lammps_data()获取的AA数据，必须包含'bonds'键
         mapping_csv: CG映射CSV文件路径 (bead_id, mol_id, bead_type, AA_id, mass)
+        bond_mapping: YAML 提供的 bond 组合→类型ID预填表
+        angle_mapping: YAML 提供的 angle 组合→类型ID预填表
+        dihedral_mapping: YAML 提供的 dihedral 组合→类型ID预填表
 
     Returns:
         (cg_bonds, cg_angles, cg_dihedrals):
@@ -254,12 +267,17 @@ def derive_cg_topology(aa_data: Dict, mapping_csv: str) -> Tuple[np.ndarray, np.
     # 构建 bead_types 映射 {bead_id: bead_type}
     bead_types = {bead_id: info['bead_type'] for bead_id, info in mapping_dict.items()}
 
-    # 从 AA bonds 推导 CG bonds（传入 bead_types）
-    cg_bonds = derive_cg_bonds_from_aa(aa_data['bonds'], mapping_dict, bead_types)
+    # 从 AA bonds 推导 CG bonds（传入 bead_types 和 bond_mapping）
+    cg_bonds = derive_cg_bonds_from_aa(aa_data['bonds'], mapping_dict, bead_types,
+                                        type_mapping=bond_mapping)
 
-    # 从 CG bonds 推导 angles 和 dihedrals（传入 bead_types）
+    # 从 CG bonds 推导 angles 和 dihedrals（传入 bead_types 和映射）
     if len(cg_bonds) > 0:
-        topology = derive_cg_topology_from_bonds(cg_bonds, bead_types=bead_types)
+        topology = derive_cg_topology_from_bonds(
+            cg_bonds, bead_types=bead_types,
+            angle_type_mapping=angle_mapping,
+            dihedral_type_mapping=dihedral_mapping
+        )
         return cg_bonds, topology.angles, topology.dihedrals
     else:
         return (
@@ -330,13 +348,122 @@ def export_cg_bead_info(cg_data: Dict, mapping_dict: Dict,
     print(f"CG bead info 已导出: {out_path} ({len(cg_data['ids'])} beads)")
 
 
+def _load_type_mapping_yaml(yaml_path: str) -> Dict[str, Dict[Tuple, int]]:
+    """
+    加载并验证 YAML 类型映射文件。
+
+    对 YAML 中的 bead type 组合进行对称规范化（与 assign_topology_types 规则一致），
+    检测同一拓扑类内的重复组合。
+
+    Args:
+        yaml_path: YAML 文件路径
+
+    Returns:
+        {
+            'bond': {(1, 2): 1, (1, 1): 2},        # 规范化后的组合 → type_id
+            'angle': {(1, 1, 2): 1},
+            'dihedral': {(1, 1, 2, 2): 1}
+        }
+        缺失的顶层键对应空 dict
+
+    Raises:
+        ImportError: PyYAML 未安装
+        FileNotFoundError: YAML 文件不存在
+        ValueError: 格式错误、bead_types 长度不匹配、重复组合、type_id ≤ 0
+    """
+    if not HAS_YAML:
+        raise ImportError("需要安装 PyYAML: pip install PyYAML")
+
+    yaml_path = Path(yaml_path)
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"YAML 类型映射文件不存在: {yaml_path}")
+
+    with open(yaml_path, 'r') as f:
+        raw = yaml.safe_load(f)
+
+    if raw is None:
+        return {'bond': {}, 'angle': {}, 'dihedral': {}}
+
+    if not isinstance(raw, dict):
+        raise ValueError(f"YAML 根节点必须是 dict（mapping），实际为: {type(raw).__name__}")
+
+    result = {'bond': {}, 'angle': {}, 'dihedral': {}}
+
+    # 各拓扑类的配置：顶层键名、期望的 bead_types 长度、type 字段名
+    topo_specs = [
+        ('bonds',     'bond',     2, 'bond_type'),
+        ('angles',    'angle',    3, 'angle_type'),
+        ('dihedrals', 'dihedral', 4, 'dihedral_type'),
+    ]
+
+    for yaml_key, kind, expected_len, type_field in topo_specs:
+        entries = raw.get(yaml_key)
+        if entries is None:
+            continue  # 该拓扑类未定义，跳过
+
+        if not isinstance(entries, list):
+            raise ValueError(
+                f"YAML 中 '{yaml_key}' 必须是列表，实际为: {type(entries).__name__}"
+            )
+
+        for i, entry in enumerate(entries):
+            # 验证 bead_types 字段
+            if 'bead_types' not in entry:
+                raise ValueError(
+                    f"'{yaml_key}' 第 {i+1} 项缺少 'bead_types' 字段"
+                )
+            bead_types = entry['bead_types']
+            if not isinstance(bead_types, list) or len(bead_types) != expected_len:
+                raise ValueError(
+                    f"'{yaml_key}' 第 {i+1} 项 bead_types 必须是长度为 {expected_len} 的列表，"
+                    f"实际: {bead_types}"
+                )
+
+            # 验证 type 字段
+            if type_field not in entry:
+                raise ValueError(
+                    f"'{yaml_key}' 第 {i+1} 项缺少 '{type_field}' 字段"
+                )
+            type_id = entry[type_field]
+            if not isinstance(type_id, int) or type_id <= 0:
+                raise ValueError(
+                    f"'{yaml_key}' 第 {i+1} 项 {type_field} 必须是正整数，实际: {type_id}"
+                )
+
+            # 对称规范化
+            bead_type_tuple = tuple(bead_types)
+            if kind == 'bond':
+                bead_type_tuple = tuple(sorted(bead_type_tuple))
+            elif kind == 'angle':
+                if bead_type_tuple[0] > bead_type_tuple[2]:
+                    bead_type_tuple = (bead_type_tuple[2], bead_type_tuple[1], bead_type_tuple[0])
+            elif kind == 'dihedral':
+                reversed_tuple = (bead_type_tuple[3], bead_type_tuple[2],
+                                  bead_type_tuple[1], bead_type_tuple[0])
+                if bead_type_tuple > reversed_tuple:
+                    bead_type_tuple = reversed_tuple
+
+            # 检测重复
+            if bead_type_tuple in result[kind]:
+                existing_id = result[kind][bead_type_tuple]
+                raise ValueError(
+                    f"'{yaml_key}' 中 bead type 组合 {tuple(bead_types)}（规范化后: "
+                    f"{bead_type_tuple}）重复定义（type_id={type_id} 与 {existing_id} 冲突）"
+                )
+
+            result[kind][bead_type_tuple] = type_id
+
+    return result
+
+
 def convert_data_to_cg(aa_data: Dict, mapping_csv: str,
                        cg_bonds_file: str = None,
                        cg_angles_file: str = None,
                        cg_dihedrals_file: str = None,
                        derive_topology: bool = False,
                        output_cg_topology_dir: str = None,
-                       export_bead_info: bool = True) -> Tuple[Dict, Dict]:
+                       export_bead_info: bool = True,
+                       type_mapping_yaml: str = None) -> Tuple[Dict, Dict]:
     """
     将AA data转换为CG data。
 
@@ -349,6 +476,7 @@ def convert_data_to_cg(aa_data: Dict, mapping_csv: str,
         derive_topology: 是否从AA data + mapping自动推导CG拓扑
         output_cg_topology_dir: 导出推导的CG拓扑到文件（仅在derive_topology=True时有效）
         export_bead_info: 是否导出cg_bead_info.txt（当output_cg_topology_dir存在时自动导出）
+        type_mapping_yaml: YAML 类型映射文件路径（可选，仅 derive_topology=True 时有效）
 
     Returns:
         (cg_data, mapping_dict): CG数据字典和映射字典
@@ -371,6 +499,8 @@ def convert_data_to_cg(aa_data: Dict, mapping_csv: str,
 
     if cg_bonds_file and Path(cg_bonds_file).exists():
         # 优先级1: 显式文件路径
+        if type_mapping_yaml:
+            print("警告: --type-mapping 仅在 --derive-topology 模式下生效，当前使用预计算拓扑文件，忽略 YAML 映射")
         print(f"从文件加载 CG topology: {cg_bonds_file}")
         cg_bonds = np.loadtxt(cg_bonds_file, dtype=int)
         if cg_bonds.ndim == 1:
@@ -388,7 +518,30 @@ def convert_data_to_cg(aa_data: Dict, mapping_csv: str,
     elif derive_topology:
         # 优先级2: 自动推导
         print("从 AA bonds + mapping 推导 CG topology...")
-        cg_bonds, cg_angles, cg_dihedrals = derive_cg_topology(aa_data, mapping_csv)
+
+        # 加载 YAML type mapping（如果提供）
+        bond_mapping = None
+        angle_mapping = None
+        dihedral_mapping = None
+        if type_mapping_yaml:
+            print(f"  加载类型映射 YAML: {type_mapping_yaml}")
+            type_mapping = _load_type_mapping_yaml(type_mapping_yaml)
+            bond_mapping = type_mapping.get('bond') or None
+            angle_mapping = type_mapping.get('angle') or None
+            dihedral_mapping = type_mapping.get('dihedral') or None
+            if bond_mapping:
+                print(f"    bond 映射: {len(bond_mapping)} 条")
+            if angle_mapping:
+                print(f"    angle 映射: {len(angle_mapping)} 条")
+            if dihedral_mapping:
+                print(f"    dihedral 映射: {len(dihedral_mapping)} 条")
+
+        cg_bonds, cg_angles, cg_dihedrals = derive_cg_topology(
+            aa_data, mapping_csv,
+            bond_mapping=bond_mapping,
+            angle_mapping=angle_mapping,
+            dihedral_mapping=dihedral_mapping
+        )
         print(f"  CG bonds: {len(cg_bonds)}, angles: {len(cg_angles)}, dihedrals: {len(cg_dihedrals)}")
 
         # 可选: 导出推导的拓扑
