@@ -1002,18 +1002,18 @@ Smoke Test 报告
 
 | 模块 | 文件路径 |
 |---|---|
-| CLI 入口 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/run_refactored.py` |
-| 配置加载 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/config_loader.py` |
-| 映射生成 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/mapping_generator.py` |
-| 模板解析 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/template_parser.py` |
-| 数据提取 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/lammps_data_extractor.py` |
-| 键检测 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/bond_detector.py` |
-| 反应定位 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/reaction_locator.py` |
-| CG 映射 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/cg_mapper.py` |
-| CG 转换 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/cg_converter.py` |
-| CG 初始化 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/cg_initializer.py` |
-| CG 键映射 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/cg_bond_mapper.py` |
-| 反应命令 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/reaction_commands.py` |
-| CG 反应识别 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/cg_reaction_identifier.py` |
-| 冒烟测试编排 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/smoke_test_harness.py` |
-| 冒烟测试验证 | `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/smoke_validator.py` |
+| CLI 入口 | `/home/large_storage/jrf/lmp_py_react/LmpPy/run_refactored.py` |
+| 配置加载 | `/home/large_storage/jrf/lmp_py_react/LmpPy/core/config_loader.py` |
+| 映射生成 | `/home/large_storage/jrf/lmp_py_react/LmpPy/core/mapping_generator.py` |
+| 模板解析 | `/home/large_storage/jrf/lmp_py_react/LmpPy/core/template_parser.py` |
+| 数据提取 | `/home/large_storage/jrf/lmp_py_react/LmpPy/core/lammps_data_extractor.py` |
+| 键检测 | `/home/large_storage/jrf/lmp_py_react/LmpPy/core/bond_detector.py` |
+| 反应定位 | `/home/large_storage/jrf/lmp_py_react/LmpPy/core/reaction_locator.py` |
+| CG 映射 | `/home/large_storage/jrf/lmp_py_react/LmpPy/core/cg_mapper.py` |
+| CG 转换 | `/home/large_storage/jrf/lmp_py_react/LmpPy/core/cg_converter.py` |
+| CG 初始化 | `/home/large_storage/jrf/lmp_py_react/LmpPy/core/cg_initializer.py` |
+| CG 键映射 | `/home/large_storage/jrf/lmp_py_react/LmpPy/core/cg_bond_mapper.py` |
+| 反应命令 | `/home/large_storage/jrf/lmp_py_react/LmpPy/core/reaction_commands.py` |
+| CG 反应识别 | `/home/large_storage/jrf/lmp_py_react/LmpPy/core/cg_reaction_identifier.py` |
+| 冒烟测试编排 | `/home/large_storage/jrf/lmp_py_react/LmpPy/core/smoke_test_harness.py` |
+| 冒烟测试验证 | `/home/large_storage/jrf/lmp_py_react/LmpPy/core/smoke_validator.py` |

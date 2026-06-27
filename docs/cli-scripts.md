@@ -32,9 +32,9 @@
 
 | 路径 | 说明 |
 |------|------|
-| `/home/jrf/PythonProject/lmp_py_react/LmpPy/run_refactored.py` | 主入口脚本 |
-| `/home/jrf/PythonProject/lmp_py_react/LmpPy/scripts/` | 所有工具脚本 |
-| `/home/jrf/PythonProject/lmp_py_react/LmpPy/core/cg_bond_mapper.py` | `atom_bonds_to_cg_bonds()` 函数 |
+| `/home/large_storage/jrf/lmp_py_react/LmpPy/run_refactored.py` | 主入口脚本 |
+| `/home/large_storage/jrf/lmp_py_react/LmpPy/scripts/` | 所有工具脚本 |
+| `/home/large_storage/jrf/lmp_py_react/LmpPy/core/cg_bond_mapper.py` | `atom_bonds_to_cg_bonds()` 函数 |
 
 ---
 
@@ -645,7 +645,7 @@ CUSTOM_BEAD_TYPE_MAP = {
 
 ## 附录：脚本执行环境说明
 
-所有脚本需在 `/home/jrf/PythonProject/lmp_py_react` 目录下执行，以确保跨仓库导入正确。脚本内部通过以下方式自动添加项目根目录到 `sys.path`：
+所有脚本需在 `/home/large_storage/jrf/lmp_py_react` 目录下执行，以确保跨仓库导入正确。脚本内部通过以下方式自动添加项目根目录到 `sys.path`：
 
 ```python
 _project_root = Path(__file__).resolve().parent.parent.parent

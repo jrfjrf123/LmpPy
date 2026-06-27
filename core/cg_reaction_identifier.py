@@ -791,16 +791,29 @@ def identify_reaction(cg_bonds_before: np.ndarray,
 # ============================================================
 
 if __name__ == "__main__":
+    import argparse
     import sys
 
     # 将项目根目录加入路径以便导入
-    # worktree 路径: .../LmpPy/.worktrees/smoke-test/core/
-    # 项目根目录: .../lmp_py_react/ (parent^5)
+    # 脚本路径: .../lmp_py_react/LmpPy/core/cg_reaction_identifier.py
+    # 项目根目录: .../lmp_py_react/ (parent^3)
     script_path = Path(__file__).resolve()
-    project_root = script_path.parent.parent.parent.parent.parent
+    project_root = script_path.parent.parent.parent
     sys.path.insert(0, str(project_root))
 
     from LmpPy.core.cg_bond_mapper import atom_bonds_to_cg_bonds
+
+    # ------------------------------------------------------------------
+    # 命令行参数：允许自定义 reactions 目录
+    # ------------------------------------------------------------------
+    parser = argparse.ArgumentParser(description="CG 反应识别模块自测")
+    parser.add_argument(
+        "--reactions-dir",
+        type=Path,
+        default=project_root / "old_dat_without_dvc" / "test_EPR" / "large_monomers_system" / "common_CG_map" / "reactions",
+        help="反应模板目录路径（默认：项目根目录下的 old_dat_without_dvc/test_EPR/...）",
+    )
+    args = parser.parse_args()
 
     print("=" * 60)
     print("CG 反应识别模块自测")
@@ -809,7 +822,7 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # 测试 1: 从真实 reactions 目录加载签名
     # ------------------------------------------------------------------
-    reactions_dir = Path("/home/jrf/PythonProject/lmp_py_react/test_EPR/large_monomers_system/common_CG_map/reactions")
+    reactions_dir = args.reactions_dir
 
     print("\n[测试 1] 加载反应签名...")
     signatures = load_reaction_signatures(reactions_dir)
