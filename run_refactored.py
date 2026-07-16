@@ -523,9 +523,10 @@ class LAMMPSReactionRunner:
         Returns:
             BondChanges: 键变化结果
         """
-        n_atoms = len(self.mass_list) if hasattr(self, 'mass_list') else max(
+        # 使用实际原子ID的最大值，而不是原子类型数（mass_list 的长度）
+        n_atoms = int(max(
             bonds_before[:, 1:3].max(), bonds_after[:, 1:3].max()
-        )
+        ))
         detector = BondDetector(n_atoms)
         return detector.detect(bonds_before, bonds_after)
 
