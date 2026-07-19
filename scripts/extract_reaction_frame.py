@@ -242,6 +242,12 @@ def main():
         help='随机种子（用于可重复的随机选择）'
     )
     parser.add_argument(
+        '--output-dir',
+        type=Path,
+        default=None,
+        help='输出目录（默认为 md_dir）'
+    )
+    parser.add_argument(
         '--output-prefix',
         type=str,
         default='reaction_frame',
@@ -304,7 +310,8 @@ def main():
     prev_frame = find_previous_cg_frame(traj_path, timestep) if prev_timestep is None else find_cg_frame_at_timestep(traj_path, prev_timestep)
 
     # 输出 lammpstrj 格式
-    output_dir = md_dir
+    output_dir = args.output_dir if args.output_dir is not None else md_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
     prefix = args.output_prefix
 
     # 当前帧 (反应后)
