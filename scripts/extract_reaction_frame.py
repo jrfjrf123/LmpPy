@@ -186,6 +186,17 @@ def print_reaction_details(
     print("反应列表:")
     print(f"{'-'*70}")
 
+    # 收集所有 bead 类型变化（去重）
+    bead_type_changes = {}
+    for rxn in reactions:
+        for bead_key in ['bead1', 'bead2']:
+            bead_id = rxn[bead_key]
+            if bead_id is not None:
+                type_before = rxn[f'{bead_key}_type_before']
+                type_after = rxn[f'{bead_key}_type_after']
+                if bead_id not in bead_type_changes:
+                    bead_type_changes[bead_id] = (type_before, type_after)
+
     for i, rxn in enumerate(reactions, 1):
         a1, a2 = rxn['atom1'], rxn['atom2']
         b1, b2 = rxn['bead1'], rxn['bead2']
@@ -201,11 +212,18 @@ def print_reaction_details(
         print(f"  新 AA 键: {a1} - {a2} (键类型: {rxn['bond_type']})")
         print(f"    原子 {a1}: 坐标 ({coord1[0]:.3f}, {coord1[1]:.3f}, {coord1[2]:.3f})")
         print(f"    原子 {a2}: 坐标 ({coord2[0]:.3f}, {coord2[1]:.3f}, {coord2[2]:.3f})")
-
         if b1 is not None:
-            print(f"    CG bead {b1}: type {rxn['bead1_type_before']} -> {rxn['bead1_type_after']}")
+            print(f"    -> CG bead {b1}")
         if b2 is not None:
-            print(f"    CG bead {b2}: type {rxn['bead2_type_before']} -> {rxn['bead2_type_after']}")
+            print(f"    -> CG bead {b2}")
+
+    # 单独打印 bead 类型变化（去重后）
+    if bead_type_changes:
+        print(f"\n{'-'*70}")
+        print("Bead 类型变化 (去重):")
+        print(f"{'-'*70}")
+        for bead_id, (t_before, t_after) in sorted(bead_type_changes.items()):
+            print(f"  Bead {bead_id}: type {t_before} -> {t_after}")
 
 
 def main():
