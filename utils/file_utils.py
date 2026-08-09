@@ -159,6 +159,60 @@ def read_lammps_dump_file(path: str, max_frames: Optional[int] = None) -> list:
     return frames
 
 
+def iter_lammps_dump_frames(path: str, max_frames: Optional[int] = None):
+    """流式迭代 LAMMPS dump 文件，逐帧 yield，不全量读入内存。
+
+    与 read_lammps_dump_file 返回格式一致，但适用于 GB 级轨迹。
+
+    参数:
+        path: dump 文件路径
+        max_frames: 最大读取帧数 (None 表示全部)
+
+    yield:
+        dict: {'timestep': int, 'box': np.ndarray(3,2), 'ids': np.ndarray,
+               'types': np.ndarray, 'coords': np.ndarray(N,3)}
+    """
+    import io as _io
+
+    import pandas as _pd
+
+    n_yielded = 0
+    with open(path, "r") as f:
+        while True:
+            line = f.readline()
+            if not line:
+                return
+            if not line.startswith("ITEM: TIMESTEP"):
+                continue
+
+            timestep = int(f.readline().strip())
+            f.readline()  # ITEM: NUMBER OF ATOMS
+            n_atoms = int(f.readline().strip())
+            bounds_header = f.readline()  # ITEM: BOX BOUNDS ...
+            if "xy" in bounds_header:
+                raise NotImplementedError("不支持三斜(triclinic)盒子")
+            box = np.zeros((3, 2), dtype=np.float64)
+            for j in range(3):
+                parts = f.readline().split()
+                box[j] = [float(parts[0]), float(parts[1])]
+
+            atoms_header = f.readline()  # ITEM: ATOMS id type x y z ...
+            cols = atoms_header.split()[2:]
+            buf = "".join(f.readline() for _ in range(n_atoms))
+            arr = _pd.read_csv(_io.StringIO(buf), sep=r"\s+", header=None, names=cols)
+
+            yield {
+                "timestep": timestep,
+                "box": box,
+                "ids": arr["id"].to_numpy(np.int64),
+                "types": arr["type"].to_numpy(np.int32),
+                "coords": arr[["x", "y", "z"]].to_numpy(np.float64),
+            }
+            n_yielded += 1
+            if max_frames is not None and n_yielded >= max_frames:
+                return
+
+
 if __name__ == "__main__":
     import tempfile
 
