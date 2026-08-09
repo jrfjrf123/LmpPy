@@ -130,6 +130,24 @@ def cmd_rebuild(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_reactivity_ratio(args: argparse.Namespace) -> None:
+    """竞聚率统计分析。"""
+    from .reactivity_ratio import analyze_reactivity_ratio
+
+    analyze_reactivity_ratio(
+        run_dirs=args.input_dirs or None,
+        output_dir=args.output_dir,
+        windows=args.windows,
+        pair_cutoff=args.pair_cutoff,
+        blocks=args.blocks,
+        n_boot=args.n_boot,
+        seed=args.seed,
+        max_frames=args.max_frames,
+        from_counts=args.from_counts,
+        counts_out=args.counts_out,
+    )
+
+
 def main(argv: Optional[list] = None) -> None:
     """CLI 主入口。"""
     parser = argparse.ArgumentParser(
@@ -204,6 +222,28 @@ def main(argv: Optional[list] = None) -> None:
         help="reactions 配置目录 (用于推断 reaction_type)",
     )
 
+    # ---- reactivity-ratio ----
+    p_rr = subparsers.add_parser(
+        "reactivity-ratio", help="竞聚率统计分析 (r1/r2, 双归一化, 转化率分辨)"
+    )
+    p_rr.add_argument(
+        "input_dirs", type=str, nargs="*",
+        help="process 运行目录列表 (各含 ml_output/),按时间顺序",
+    )
+    p_rr.add_argument("--windows", type=int, default=20, help="转化率窗口数")
+    p_rr.add_argument("--pair-cutoff", type=float, default=10.0,
+                      help="候选对距离截断 (Å),需与模拟一致")
+    p_rr.add_argument("--blocks", type=int, default=20, help="block bootstrap 块数")
+    p_rr.add_argument("--n-boot", type=int, default=1000, help="bootstrap 重抽样次数")
+    p_rr.add_argument("--seed", type=int, default=0, help="随机种子")
+    p_rr.add_argument("--max-frames", type=int, default=None,
+                      help="每 process 最多读帧数 (调试用)")
+    p_rr.add_argument("--counts-out", type=str, default=None,
+                      help="per-cycle 计数表输出路径 (设置后单独可复用)")
+    p_rr.add_argument("--from-counts", type=str, default=None,
+                      help="从已有计数表直接估计 (跳过轨迹扫描)")
+    p_rr.add_argument("-o", "--output-dir", type=str, default=None, help="输出目录")
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -216,6 +256,7 @@ def main(argv: Optional[list] = None) -> None:
         "reaction-stats": cmd_reaction_stats,
         "all": cmd_all,
         "rebuild": cmd_rebuild,
+        "reactivity-ratio": cmd_reactivity_ratio,
     }
 
     handler = handlers.get(args.command)
