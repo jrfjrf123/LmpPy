@@ -1,5 +1,6 @@
 """竞聚率分析模块测试。"""
 import io
+import json
 import math
 from pathlib import Path
 
@@ -244,3 +245,29 @@ def test_collect_per_cycle_counts_frame_mismatch(tmp_path):
         f.write("5,1,2,3,5,1,3,3.5,rxn_X,1,0\n")  # cycle 5 > 帧数 1
     with pytest.raises(ValueError, match="不一致"):
         collect_per_cycle_counts([tmp_path / "process1"], pair_cutoff=10.0, verbose=False)
+
+
+from LmpPy.output_analysis.reactivity_ratio import analyze_reactivity_ratio
+
+
+def test_analyze_from_counts(tmp_path):
+    """从 counts CSV 走完整估计流程,验证输出文件与 JSON 结构。"""
+    df = _synthetic_counts(n_cycles=2000, r1=2.0)
+    df.insert(0, "cycle", range(1, len(df) + 1))
+    df.insert(1, "timestep", df["cycle"] * 1000)
+    for t in (1, 2, 3, 4):
+        df[f"n{t}"] = 50
+    counts_csv = tmp_path / "per_cycle_counts.csv"
+    df.to_csv(counts_csv, index=False)
+    out_dir = tmp_path / "analysis"
+    analyze_reactivity_ratio(
+        from_counts=str(counts_csv), output_dir=str(out_dir),
+        windows=10, blocks=10, n_boot=200, seed=0,
+    )
+    summary = json.loads((out_dir / "reactivity_ratio_summary.json").read_text())
+    assert summary["global"]["r1_cand"] == pytest.approx(2.0, rel=0.1)
+    assert "r1_cand_boot_ci" in summary["bootstrap_ci"]
+    assert "r1_ml" in summary["mayo_lewis_fit"]
+    assert (out_dir / "r_vs_conversion.png").exists()
+    assert (out_dir / "composition_mayo_lewis.png").exists()
+    assert (out_dir / "window_estimates.csv").exists()

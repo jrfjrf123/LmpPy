@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -307,3 +308,166 @@ def mayo_lewis_fit(win_df: pd.DataFrame) -> Dict[str, float]:
 
     popt, _ = curve_fit(model, f1, F1, p0=[1.0, 1.0], bounds=(0, np.inf))
     return {"r1_ml": float(popt[0]), "r2_ml": float(popt[1])}
+
+
+# ---------------------------------------------------------------------------
+# 编排入口与绘图
+# ---------------------------------------------------------------------------
+
+
+def _nan_to_none(obj):
+    """递归把 NaN 替换为 None,便于 JSON 序列化。"""
+    if isinstance(obj, dict):
+        return {k: _nan_to_none(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_nan_to_none(v) for v in obj]
+    if isinstance(obj, float) and math.isnan(obj):
+        return None
+    return obj
+
+
+def plot_r_vs_conversion(
+    win_tables: Dict[int, pd.DataFrame],
+    global_est: Dict[str, float],
+    boot_ci: Dict[str, list],
+    out_path: Path,
+) -> None:
+    """r1(X)、r2(X) 轨迹图:双归一化 + 窗宽扫描 + 全局 CI 带。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    primary = max(win_tables.keys())
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    for ax, rkey, title in [
+        (axes[0], "r1", "r1 (E 末端)"),
+        (axes[1], "r2", "r2 (P 末端)"),
+    ]:
+        for nw, wdf in sorted(win_tables.items()):
+            alpha = 1.0 if nw == primary else 0.35
+            lw = 1.8 if nw == primary else 1.0
+            label_suffix = f" (windows={nw})"
+            ax.plot(wdf["X_mid"], wdf[f"{rkey}_bulk"], "o-", alpha=alpha, lw=lw,
+                    color="tab:blue", label="bulk" + label_suffix)
+            ax.plot(wdf["X_mid"], wdf[f"{rkey}_cand"], "s--", alpha=alpha, lw=lw,
+                    color="tab:orange", label="cand" + label_suffix)
+        ci = boot_ci.get(f"{rkey}_bulk_boot_ci")
+        if ci and ci[0] is not None:
+            ax.axhspan(ci[0], ci[1], color="tab:blue", alpha=0.08)
+        ax.axhline(global_est[f"{rkey}_bulk"], color="tab:blue", ls=":", alpha=0.7)
+        ax.axhline(1.0, color="gray", ls="-", lw=0.5)
+        ax.set_xlabel("conversion X")
+        ax.set_ylabel(rkey)
+        ax.set_title(title)
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_mayo_lewis(
+    win_df: pd.DataFrame, fit: Dict[str, float], out_path: Path
+) -> None:
+    """瞬时共聚组成 F1 vs f1 散点 + Mayo-Lewis 拟合曲线。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    r1_ml, r2_ml = fit["r1_ml"], fit["r2_ml"]
+    f1_grid = np.linspace(0.01, 0.99, 200)
+    f2_grid = 1.0 - f1_grid
+    F1_grid = ((r1_ml * f1_grid**2 + f1_grid * f2_grid)
+               / (r1_ml * f1_grid**2 + 2 * f1_grid * f2_grid + r2_ml * f2_grid**2))
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    d = win_df.dropna(subset=["F1"])
+    ax.plot(d["f1"], d["F1"], "o", label="simulation (windowed)")
+    ax.plot(f1_grid, F1_grid, "-",
+            label=f"Mayo-Lewis fit: r1={r1_ml:.3f}, r2={r2_ml:.3f}")
+    ax.plot([0, 1], [0, 1], ":", color="gray", label="F1 = f1")
+    ax.set_xlabel("f1 (feed, E fraction)")
+    ax.set_ylabel("F1 (instantaneous copolymer, E fraction)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def analyze_reactivity_ratio(
+    run_dirs: Optional[Sequence] = None,
+    output_dir: Optional[str] = None,
+    windows: int = 20,
+    pair_cutoff: float = 10.0,
+    blocks: int = 20,
+    n_boot: int = 1000,
+    seed: int = 0,
+    max_frames: Optional[int] = None,
+    from_counts: Optional[str] = None,
+    counts_out: Optional[str] = None,
+) -> pd.DataFrame:
+    """竞聚率分析主入口。
+
+    三种用法:
+    1. 全流程: 传 run_dirs + output_dir
+    2. 只统计计数: 传 run_dirs + counts_out(不传 output_dir)
+    3. 只做估计: 传 from_counts + output_dir
+    """
+    if from_counts is not None:
+        df = pd.read_csv(from_counts)
+        required = ({"cycle", "n5", "n6", "E35", "E36", "E45", "E46"}
+                    | {f"N{ch}" for ch in CHANNELS})
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"counts 文件缺少列: {sorted(missing)}")
+    else:
+        if not run_dirs:
+            raise ValueError("必须提供 run_dirs 或 from_counts")
+        df = collect_per_cycle_counts(run_dirs, pair_cutoff, max_frames)
+        if counts_out:
+            Path(counts_out).parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(counts_out, index=False)
+            print(f"[输出] per-cycle 计数表: {counts_out}")
+
+    if output_dir is None:
+        return df  # counts-only 模式
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    global_est = point_estimates(df)
+    boot = block_bootstrap(df, n_blocks=blocks, n_boot=n_boot, seed=seed)
+    beta_ci = beta_intervals(df)
+
+    # 窗宽敏感性:主窗宽 + 10/40
+    widths = sorted({10, windows, 40})
+    win_tables = {w: window_estimates(df, w) for w in widths}
+    win_primary = win_tables[windows]
+    ml_fit = mayo_lewis_fit(win_primary)
+
+    win_primary.to_csv(out_dir / "window_estimates.csv", index=False)
+    plot_r_vs_conversion(win_tables, global_est, boot, out_dir / "r_vs_conversion.png")
+    plot_mayo_lewis(win_primary, ml_fit, out_dir / "composition_mayo_lewis.png")
+
+    X = conversion_series(df)
+    summary = {
+        "global": global_est,
+        "bootstrap_ci": boot,
+        "beta_ci": beta_ci,
+        "mayo_lewis_fit": ml_fit,
+        "diagnostics": {
+            "n_cycles": int(len(df)),
+            "events_per_channel": {ch: int(df[f"N{ch}"].sum()) for ch in CHANNELS},
+            "conversion_final": float(X.iloc[-1]),
+            "zero_event_windows": int((win_primary["n_events"] == 0).sum()),
+        },
+        "params": {
+            "windows": windows, "pair_cutoff": pair_cutoff,
+            "blocks": blocks, "n_boot": n_boot, "seed": seed,
+        },
+    }
+    with open(out_dir / "reactivity_ratio_summary.json", "w") as f:
+        json.dump(_nan_to_none(summary), f, indent=2, ensure_ascii=False)
+    print(f"[输出] 分析结果目录: {out_dir}")
+    print(f"  r1: bulk={global_est['r1_bulk']:.3f}, cand={global_est['r1_cand']:.3f}, ML={ml_fit['r1_ml']:.3f}")
+    print(f"  r2: bulk={global_est['r2_bulk']:.3f}, cand={global_est['r2_cand']:.3f}, ML={ml_fit['r2_ml']:.3f}")
+    return df
