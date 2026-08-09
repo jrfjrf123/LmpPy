@@ -43,3 +43,33 @@ def test_iter_lammps_dump_frames_max_frames(tmp_path):
     _write_tiny_dump(dump)
     frames = list(iter_lammps_dump_frames(dump, max_frames=1))
     assert len(frames) == 1
+
+
+from LmpPy.output_analysis.reactivity_ratio import (
+    CHANNELS,
+    channel_of_pair,
+    count_events,
+)
+
+
+def test_channel_of_pair():
+    assert channel_of_pair(3, 5) == "11"
+    assert channel_of_pair(5, 3) == "11"  # 无序
+    assert channel_of_pair(3, 6) == "12"
+    assert channel_of_pair(4, 5) == "21"
+    assert channel_of_pair(4, 6) == "22"
+    assert channel_of_pair(1, 2) is None  # 非反应通道
+
+
+def test_count_events_zero_fill():
+    df = pd.DataFrame({
+        "cycle": [1, 3, 3],
+        "atom1_type_before": [3, 4, 3],
+        "atom2_type_before": [5, 6, 6],
+    })
+    out = count_events(df)
+    assert list(out["cycle"]) == [1, 2, 3]
+    assert int(out.loc[out["cycle"] == 1, "N11"].iloc[0]) == 1
+    assert int(out.loc[out["cycle"] == 2, ["N11", "N12", "N21", "N22"]].sum().sum()) == 0
+    assert int(out.loc[out["cycle"] == 3, "N12"].iloc[0]) == 1
+    assert int(out.loc[out["cycle"] == 3, "N22"].iloc[0]) == 1
