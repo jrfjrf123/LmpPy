@@ -271,3 +271,6 @@ def test_analyze_from_counts(tmp_path):
     assert (out_dir / "r_vs_conversion.png").exists()
     assert (out_dir / "composition_mayo_lewis.png").exists()
     assert (out_dir / "window_estimates.csv").exists()
+    diag = summary["diagnostics"]
+    assert diag["events_per_active_center"] > 0
+    assert diag["candidate_pairs_per_cycle"] > 0

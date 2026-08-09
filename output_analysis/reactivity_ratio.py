@@ -449,14 +449,24 @@ def analyze_reactivity_ratio(
     plot_mayo_lewis(win_primary, ml_fit, out_dir / "composition_mayo_lewis.png")
 
     X = conversion_series(df)
+    n_events_total = int(sum(int(df[f"N{ch}"].sum()) for ch in CHANNELS))
+    n_cycles = int(len(df))
+    active_centers = float(df["n3"].mean()) + float(df["n4"].mean())
+    candidate_pairs = float(
+        sum(float(df[col].mean()) for col in CHANNEL_EXPOSURE.values())
+    )
     summary = {
         "global": global_est,
         "bootstrap_ci": boot,
         "beta_ci": beta_ci,
         "mayo_lewis_fit": ml_fit,
         "diagnostics": {
-            "n_cycles": int(len(df)),
+            "n_cycles": n_cycles,
             "events_per_channel": {ch: int(df[f"N{ch}"].sum()) for ch in CHANNELS},
+            "events_per_active_center": (
+                (n_events_total / n_cycles) / active_centers if active_centers > 0 else None
+            ),
+            "candidate_pairs_per_cycle": candidate_pairs,
             "conversion_final": float(X.iloc[-1]),
             "zero_event_windows": int((win_primary["n_events"] == 0).sum()),
         },
