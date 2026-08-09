@@ -100,7 +100,7 @@ python -m LmpPy.output_analysis reaction-stats ./process1/
 | `--from-counts` | None | 从已有计数表直接估计（跳过轨迹扫描） |
 | `-o/--output-dir` | None | 分析输出目录（JSON/PNG/CSV） |
 
-输出：`reactivity_ratio_summary.json`（双归一化点估计 + block bootstrap CI + Beta 辅助区间 + Mayo-Lewis 拟合 + 诊断量）、`r_vs_conversion.png`（r(X) 轨迹 + 窗宽扫描）、`composition_mayo_lewis.png`（组成法交叉验证）、`window_estimates.csv`。
+输出：`reactivity_ratio_summary.json`（双归一化点估计 + block bootstrap CI + Beta 辅助区间 + Mayo-Lewis 拟合 + 诊断量）、`r_vs_conversion.png`（r(X) 轨迹 + 窗宽扫描）、`composition_mayo_lewis.png`（组成法交叉验证）、`channel_rates.png`（四通道细粒度柱状图：单位单体浓度/单位候选对事件率，r1 = 柱11/柱12 直接可读）、`summary_dashboard.png`（汇总图：r 点估计+CI、r1·r2 序列结构、通道事件数、诊断量）、`window_estimates.csv`。
 
 **方法学说明**（详见设计文档 `docs/superpowers/specs/2026-08-09-reactivity-ratio-analysis-design.md`）：
 
