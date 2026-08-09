@@ -299,6 +299,8 @@ def test_analyze_from_counts(tmp_path):
     assert "r1_ml" in summary["mayo_lewis_fit"]
     assert (out_dir / "r_vs_conversion.png").exists()
     assert (out_dir / "composition_mayo_lewis.png").exists()
+    assert (out_dir / "channel_rates.png").exists()
+    assert (out_dir / "summary_dashboard.png").exists()
     assert (out_dir / "window_estimates.csv").exists()
     diag = summary["diagnostics"]
     assert diag["events_per_active_center"] > 0

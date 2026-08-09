@@ -413,6 +413,142 @@ def plot_r_vs_conversion(
     plt.close(fig)
 
 
+def plot_channel_rates(df: pd.DataFrame, out_path: Path) -> None:
+    """四通道细粒度柱状图。
+
+    左图 bulk 口径: rho_ij = N_ij / <n_j>（每单体每 cycle 事件率,
+    r1_bulk = rho11/rho12, r2_bulk = rho22/rho21 直接成立）;
+    右图 cand 口径: pi_ij = N_ij / E_ij（每候选对每 cycle 接受率,
+    r1_cand = pi11/pi12, r2_cand = pi22/pi21）。
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    N = {ch: float(df[f"N{ch}"].sum()) for ch in CHANNELS}
+    E = {col: float(df[col].sum()) for col in CHANNEL_EXPOSURE.values()}
+    n5 = float(df["n5"].mean())
+    n6 = float(df["n6"].mean())
+    n_mono = {"11": n5, "12": n6, "21": n5, "22": n6}
+
+    channels = ["11", "12", "21", "22"]
+    labels = ["E+E\n(k11)", "E+P\n(k12)", "P+E\n(k21)", "P+P\n(k22)"]
+    rho = [N[c] / n_mono[c] for c in channels]
+    pi = [N[c] / E[CHANNEL_EXPOSURE[c]] for c in channels]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+    bars1 = ax1.bar(labels, rho, color="tab:blue", alpha=0.85)
+    ax1.set_ylabel("N_ij / <n_j>  (per monomer per cycle)")
+    ax1.set_title("Bulk-normalized channel rates")
+    for b, v in zip(bars1, rho):
+        ax1.text(b.get_x() + b.get_width() / 2, v * 1.02, f"{v:.3f}",
+                 ha="center", fontsize=9)
+    ax1.axhline(0, color="gray", lw=0.5)
+
+    bars2 = ax2.bar(labels, pi, color="tab:orange", alpha=0.85)
+    ax2.set_ylabel("N_ij / E_ij  (per candidate pair per cycle)")
+    ax2.set_title("Exposure-normalized channel rates")
+    for b, v in zip(bars2, pi):
+        ax2.text(b.get_x() + b.get_width() / 2, v * 1.02, f"{v:.5f}",
+                 ha="center", fontsize=9)
+    ax2.axhline(0, color="gray", lw=0.5)
+
+    fig.suptitle(
+        f"Channel rates:  r1_bulk={rho[0]/rho[1]:.3f}, r1_cand={pi[0]/pi[1]:.3f} | "
+        f"r2_bulk={rho[3]/rho[2]:.3f}, r2_cand={pi[3]/pi[2]:.3f}",
+        fontsize=10,
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_summary_dashboard(
+    global_est: Dict[str, float],
+    boot_ci: Dict[str, list],
+    diagnostics: Dict,
+    mayo_fit: Dict[str, float],
+    out_path: Path,
+) -> None:
+    """summary 汇总图: r 点估计+CI、r1*r2 序列结构、通道事件数、诊断量文本。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+    (ax_r, ax_prod), (ax_ev, ax_diag) = axes
+
+    # (a) r1/r2 双归一化点估计 + CI 误差棒
+    r_keys = [("r1", "E end (r1 = k11/k12)"), ("r2", "P end (r2 = k22/k21)")]
+    x = np.arange(2)
+    width = 0.35
+    for i, mode in enumerate(["bulk", "cand"]):
+        vals = [global_est[f"{rk}_bulk" if mode == "bulk" else f"{rk}_cand"] for rk, _ in r_keys]
+        errs = []
+        for rk, _ in r_keys:
+            ci = boot_ci[f"{rk}_{mode}_boot_ci"]
+            if ci[0] is None:
+                errs.append((0.0, 0.0))
+            else:
+                errs.append((vals[len(errs)] - ci[0], ci[1] - vals[len(errs)]))
+        err = np.asarray(errs).T
+        axes[0][0].bar(x + (i - 0.5) * width, vals, width,
+                       yerr=err, capsize=4, label=mode,
+                       color="tab:blue" if mode == "bulk" else "tab:orange",
+                       alpha=0.85)
+    ax_r.set_xticks(x)
+    ax_r.set_xticklabels([r[1].split(" (")[0] for r in r_keys])
+    ax_r.axhline(1.0, color="gray", ls=":", lw=0.8)
+    ax_r.set_ylabel("reactivity ratio r")
+    ax_r.set_title("r1/r2 with 95% block-bootstrap CI")
+    ax_r.legend()
+
+    # (b) r1*r2 序列结构
+    for mode in ["bulk", "cand"]:
+        r1 = global_est[f"r1_{mode}"]
+        r2 = global_est[f"r2_{mode}"]
+        ci1 = boot_ci[f"r1_{mode}_boot_ci"]
+        ci2 = boot_ci[f"r2_{mode}_boot_ci"]
+        if ci1[0] is None or ci2[0] is None:
+            continue
+        lo, hi = ci1[0] * ci2[0], ci1[1] * ci2[1]
+        ax_prod.bar(mode, r1 * r2, yerr=[[r1 * r2 - lo], [hi - r1 * r2]],
+                    capsize=4, color="tab:blue" if mode == "bulk" else "tab:orange",
+                    alpha=0.85)
+    ax_prod.axhline(1.0, color="gray", ls=":", lw=0.8)
+    ax_prod.text(0.02, 1.06, "r1*r2 > 1: blocky | < 1: alternating",
+                 transform=ax_prod.transAxes, fontsize=8)
+    ax_prod.set_ylabel("r1 * r2")
+    ax_prod.set_title("Sequence structure indicator")
+
+    # (c) 通道事件数
+    ev = diagnostics["events_per_channel"]
+    ax_ev.bar(["N11", "N12", "N21", "N22"], [ev[c] for c in CHANNELS],
+              color="tab:green", alpha=0.8)
+    ax_ev.set_ylabel("total events")
+    ax_ev.set_title("Events per channel")
+
+    # (d) 诊断量文本面板
+    ax_diag.axis("off")
+    ml_ident = "identifiable" if mayo_fit.get("identifiable") else "NOT identifiable"
+    txt = (
+        f"n_cycles            : {diagnostics['n_cycles']}\n"
+        f"conversion_final    : {diagnostics['conversion_final']:.3f}\n"
+        f"events / active ct : {diagnostics['events_per_active_center']:.3f}\n"
+        f"candidate pairs/cyc: {diagnostics['candidate_pairs_per_cycle']:.0f}\n"
+        f"zero-event windows : {diagnostics['zero_event_windows']}\n"
+        f"Mayo-Lewis (ML)    : r1={mayo_fit.get('r1_ml', float('nan')):.3f}, "
+        f"r2={mayo_fit.get('r2_ml', float('nan')):.3f}\n"
+        f"  f1_delta={mayo_fit.get('f1_delta', float('nan')):.3f}, {ml_ident}"
+    )
+    ax_diag.text(0.02, 0.95, txt, transform=ax_diag.transAxes, va="top",
+                 family="monospace", fontsize=10)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def plot_mayo_lewis(
     win_df: pd.DataFrame, fit: Dict[str, float], out_path: Path
 ) -> None:
@@ -493,9 +629,6 @@ def analyze_reactivity_ratio(
     ml_fit = mayo_lewis_fit(win_primary)
 
     win_primary.to_csv(out_dir / "window_estimates.csv", index=False)
-    plot_r_vs_conversion(win_tables, global_est, boot, out_dir / "r_vs_conversion.png")
-    plot_mayo_lewis(win_primary, ml_fit, out_dir / "composition_mayo_lewis.png")
-
     X = conversion_series(df)
     n_events_total = int(sum(int(df[f"N{ch}"].sum()) for ch in CHANNELS))
     n_cycles = int(len(df))
@@ -503,21 +636,28 @@ def analyze_reactivity_ratio(
     candidate_pairs = float(
         sum(float(df[col].mean()) for col in CHANNEL_EXPOSURE.values())
     )
+    summary_diag = {
+        "n_cycles": n_cycles,
+        "events_per_channel": {ch: int(df[f"N{ch}"].sum()) for ch in CHANNELS},
+        "events_per_active_center": (
+            (n_events_total / n_cycles) / active_centers if active_centers > 0 else None
+        ),
+        "candidate_pairs_per_cycle": candidate_pairs,
+        "conversion_final": float(X.iloc[-1]),
+        "zero_event_windows": int((win_primary["n_events"] == 0).sum()),
+    }
+    plot_r_vs_conversion(win_tables, global_est, boot, out_dir / "r_vs_conversion.png")
+    plot_mayo_lewis(win_primary, ml_fit, out_dir / "composition_mayo_lewis.png")
+    plot_channel_rates(df, out_dir / "channel_rates.png")
+    plot_summary_dashboard(
+        global_est, boot, summary_diag, ml_fit, out_dir / "summary_dashboard.png"
+    )
     summary = {
         "global": global_est,
         "bootstrap_ci": boot,
         "beta_ci": beta_ci,
         "mayo_lewis_fit": ml_fit,
-        "diagnostics": {
-            "n_cycles": n_cycles,
-            "events_per_channel": {ch: int(df[f"N{ch}"].sum()) for ch in CHANNELS},
-            "events_per_active_center": (
-                (n_events_total / n_cycles) / active_centers if active_centers > 0 else None
-            ),
-            "candidate_pairs_per_cycle": candidate_pairs,
-            "conversion_final": float(X.iloc[-1]),
-            "zero_event_windows": int((win_primary["n_events"] == 0).sum()),
-        },
+        "diagnostics": summary_diag,
         "params": {
             "windows": windows, "pair_cutoff": pair_cutoff,
             "blocks": blocks, "n_boot": n_boot, "seed": seed,
