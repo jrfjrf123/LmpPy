@@ -18,6 +18,9 @@ python -m LmpPy.output_analysis reaction-stats ./process1/
 
 # 从 reaction_frames.npz 预先重建 reaction_details.csv
 python -m LmpPy.output_analysis rebuild ./process1/reaction_frames.npz -o ./process1/reaction_details.csv --config-dir ./process1/
+
+# 竞聚率分析（ML 驱动 CG 模拟输出 → r1/r2 双归一化估计）
+python -m LmpPy.output_analysis reactivity-ratio ./process1 ./process2 -o ./reactivity_ratio_analysis/
 ```
 
 ## 输入文件
@@ -65,6 +68,45 @@ python -m LmpPy.output_analysis distance ./process1/ --ref-csv reference.csv
 ```bash
 python -m LmpPy.output_analysis reaction-stats ./process1/
 ```
+
+### 4. 竞聚率 (`reactivity-ratio`)
+
+从 mlcgsim ML 驱动 CG 模拟输出直接统计共聚竞聚率 r1/r2（r1=k11/k12、r2=k22/k21，末端模型），三种用法：
+
+1. **全流程**：扫 process 轨迹（事件计数 + 类型计数 + 候选对暴露）并估计：
+   ```bash
+   python -m LmpPy.output_analysis reactivity-ratio ./process1 ./process2 ./process3 ./process4 -o ./analysis/
+   ```
+2. **只统计计数**（扫轨迹，5-15 分钟，输出可复用的 per-cycle 计数表）：
+   ```bash
+   python -m LmpPy.output_analysis reactivity-ratio ./process1 ./process2 --counts-out per_cycle_counts.csv
+   ```
+3. **只做估计**（从已有计数表，跳过轨迹扫描）：
+   ```bash
+   python -m LmpPy.output_analysis reactivity-ratio --from-counts per_cycle_counts.csv --windows 20 --blocks 20 --n-boot 1000 -o ./analysis/
+   ```
+
+参数：
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--windows` | 20 | 转化率窗口数（窗宽敏感性扫描内置 10/20/40） |
+| `--pair-cutoff` | 10.0 | 候选对距离截断 (Å)，需与模拟 `pair_cutoff` 一致 |
+| `--blocks` | 20 | block bootstrap 连续 cycle 块数 |
+| `--n-boot` | 1000 | bootstrap 重抽样次数 |
+| `--seed` | 0 | 随机种子 |
+| `--max-frames` | None | 每 process 最多读帧数（调试用，跳过帧数校验） |
+| `--counts-out` | None | per-cycle 计数表输出路径 |
+| `--from-counts` | None | 从已有计数表直接估计（跳过轨迹扫描） |
+| `-o/--output-dir` | None | 分析输出目录（JSON/PNG/CSV） |
+
+输出：`reactivity_ratio_summary.json`（双归一化点估计 + block bootstrap CI + Beta 辅助区间 + Mayo-Lewis 拟合 + 诊断量）、`r_vs_conversion.png`（r(X) 轨迹 + 窗宽扫描）、`composition_mayo_lewis.png`（组成法交叉验证）、`window_estimates.csv`。
+
+**方法学说明**（详见设计文档 `docs/superpowers/specs/2026-08-09-reactivity-ratio-analysis-design.md`）：
+
+- bulk 版（浓度归一化）对接 Mayo-Lewis 文献语义，为主结果；候选对版（暴露归一化）为辅助诊断，其价值在于与 bulk 版的偏差与随转化率的漂移；
+- 暴露表为全量 PBC 统计（与 MPI 并行设置无关）；引擎在 MPI 下因 ghost 排除会漏计跨 rank 边界候选对，该差异不影响 bulk 版；
+- `events_per_active_center` 诊断量标记候选对版进入配额饱和失真的边界。
 
 ## 绘图配置
 
