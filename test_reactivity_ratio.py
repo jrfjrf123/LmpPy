@@ -73,3 +73,37 @@ def test_count_events_zero_fill():
     assert int(out.loc[out["cycle"] == 2, ["N11", "N12", "N21", "N22"]].sum().sum()) == 0
     assert int(out.loc[out["cycle"] == 3, "N12"].iloc[0]) == 1
     assert int(out.loc[out["cycle"] == 3, "N22"].iloc[0]) == 1
+
+
+from LmpPy.output_analysis.reactivity_ratio import (
+    count_candidates_frame,
+    count_types_frame,
+)
+
+
+def test_count_types_frame():
+    types = np.array([1, 1, 3, 5, 5, 5, 6])
+    out = count_types_frame(types)
+    assert out["n1"] == 2
+    assert out["n3"] == 1
+    assert out["n5"] == 3
+    assert out["n6"] == 1
+    assert out["n2"] == 0
+    assert out["n4"] == 0
+
+
+def test_count_candidates_frame_pbc():
+    # 10 Å 立方盒子; 1 个 type3 末端, 两个 type5 单体(一个跨 PBC 边界), 一个 type6 远处
+    types = np.array([3, 5, 5, 6])
+    coords = np.array([
+        [1.0, 1.0, 1.0],
+        [2.0, 1.0, 1.0],   # 距末端 1.0 Å
+        [9.5, 1.0, 1.0],   # PBC 最小镜像下距末端 1.5 Å
+        [6.0, 6.0, 6.0],   # 远
+    ])
+    box_lengths = np.array([10.0, 10.0, 10.0])
+    out = count_candidates_frame(types, coords, box_lengths, cutoff=1.2)
+    assert out["E35"] == 1  # 只有 1.0 Å 的那对
+    assert out["E36"] == 0
+    out2 = count_candidates_frame(types, coords, box_lengths, cutoff=2.0)
+    assert out2["E35"] == 2  # PBC 对也计入

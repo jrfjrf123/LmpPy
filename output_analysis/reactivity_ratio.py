@@ -70,3 +70,36 @@ def count_events(details_df: pd.DataFrame) -> pd.DataFrame:
     for name in CHANNELS:
         out[f"N{name}"] = grp[name] if name in grp.columns else 0
     return out.reset_index()
+
+
+def count_types_frame(types: np.ndarray, n_types: int = 6) -> Dict[str, int]:
+    """统计单帧各 bead type 数量,返回 {'n1': ..., 'n6': ...}。"""
+    counts = np.bincount(types, minlength=n_types + 1)
+    return {f"n{t}": int(counts[t]) for t in range(1, n_types + 1)}
+
+
+def count_candidates_frame(
+    types: np.ndarray,
+    coords: np.ndarray,
+    box_lengths: np.ndarray,
+    cutoff: float,
+    block: int = 20000,
+) -> Dict[str, int]:
+    """统计单帧内四通道候选对数（PBC 最小镜像, 正交盒子）。
+
+    只计算 末端(type 3/4) × 单体(type 5/6) 对, 与 ML 候选对搜索同定义。
+    分块计算防内存爆。
+
+    返回: {'E35': ..., 'E36': ..., 'E45': ..., 'E46': ...}
+    """
+    out = {}
+    for a, b in [(3, 5), (3, 6), (4, 5), (4, 6)]:
+        ends = coords[types == a]
+        monos = coords[types == b]
+        cnt = 0
+        for s in range(0, len(monos), block):
+            d = monos[s : s + block, None, :] - ends[None, :, :]
+            d -= box_lengths * np.round(d / box_lengths)
+            cnt += int((np.einsum("ijk,ijk->ij", d, d) < cutoff * cutoff).sum())
+        out[f"E{a}{b}"] = cnt
+    return out
