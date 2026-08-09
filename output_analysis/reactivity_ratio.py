@@ -106,6 +106,79 @@ def count_candidates_frame(
 
 
 # ---------------------------------------------------------------------------
+# per-cycle 计数收集（事件 + 类型 + 候选对暴露,多 process 拼接）
+# ---------------------------------------------------------------------------
+
+
+def collect_per_cycle_counts(
+    run_dirs: Sequence,
+    pair_cutoff: float = 10.0,
+    max_frames: Optional[int] = None,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """从多个 process 运行目录收集 per-cycle 计数表。
+
+    参数
+    ----
+    run_dirs : process 目录列表（各含 ml_output/reaction_details.csv
+        与 ml_output/cg_trajectory.lammpstrj）,按时间顺序给出
+    pair_cutoff : 候选对距离截断 (Å),需与模拟的 pair_cutoff 一致
+    max_frames : 每个 process 最多读取的帧数（调试用;设置时跳过帧数校验）
+    verbose : 打印进度
+
+    返回
+    ----
+    pd.DataFrame: cycle(全局连续), timestep, n1..n6, E35,E36,E45,E46,
+        N11,N12,N21,N22
+    """
+    from LmpPy.output_analysis.loader import load_reaction_details
+    from LmpPy.utils.file_utils import iter_lammps_dump_frames
+
+    all_rows = []
+    cycle_offset = 0
+    for run_dir in run_dirs:
+        ml_output = Path(run_dir) / "ml_output"
+        details = load_reaction_details(ml_output)
+        events = count_events(details)
+        traj = ml_output / "cg_trajectory.lammpstrj"
+        if not traj.exists():
+            raise FileNotFoundError(f"未找到轨迹文件: {traj}")
+
+        rows_by_cycle: Dict[int, dict] = {}
+        for i, frame in enumerate(iter_lammps_dump_frames(str(traj), max_frames=max_frames)):
+            cyc = i + 1
+            row = {"cycle": cyc, "timestep": int(frame["timestep"])}
+            row.update(count_types_frame(frame["types"]))
+            row.update(count_candidates_frame(
+                frame["types"], frame["coords"],
+                frame["box"][:, 1] - frame["box"][:, 0], pair_cutoff,
+            ))
+            rows_by_cycle[cyc] = row
+            if verbose and cyc % 100 == 0:
+                print(f"  [{Path(run_dir).name}] 已处理 {cyc} 帧")
+
+        n_frames = len(rows_by_cycle)
+        n_event_cycles = int(events["cycle"].max())
+        if max_frames is None and n_event_cycles > n_frames:
+            raise ValueError(
+                f"{run_dir}: 事件 cycle 数 {n_event_cycles} 超出轨迹帧数 {n_frames} 不一致"
+            )
+
+        for cyc in range(1, n_frames + 1):
+            row = rows_by_cycle[cyc]
+            ev = events[events["cycle"] == cyc]
+            for ch in CHANNELS:
+                row[f"N{ch}"] = int(ev[f"N{ch}"].iloc[0]) if len(ev) else 0
+            row["cycle"] = cyc + cycle_offset
+            all_rows.append(row)
+        cycle_offset += n_frames
+        if verbose:
+            print(f"[collect] {Path(run_dir).name}: {n_frames} 帧完成")
+
+    return pd.DataFrame(all_rows)
+
+
+# ---------------------------------------------------------------------------
 # r 值估计
 # ---------------------------------------------------------------------------
 

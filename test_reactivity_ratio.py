@@ -185,3 +185,62 @@ def test_mayo_lewis_fit_recovers_known_r():
     fit = mayo_lewis_fit(win_df)
     assert fit["r1_ml"] == pytest.approx(r1_true, rel=1e-3)
     assert fit["r2_ml"] == pytest.approx(r2_true, rel=1e-3)
+
+
+from LmpPy.output_analysis.reactivity_ratio import collect_per_cycle_counts
+
+
+def test_collect_per_cycle_counts(tmp_path):
+    """两个微型 process 目录,验证拼接、cycle 偏移与帧数校验。"""
+    for proc, n_frames, events in [
+        ("process1", 3, [(1, 3, 5), (2, 4, 6)]),
+        ("process2", 2, [(1, 3, 6)]),
+    ]:
+        ml_output = tmp_path / proc / "ml_output"
+        ml_output.mkdir(parents=True)
+        # 微型轨迹（20 Å 盒子: 确保 (1,1,1)-(8,8,8) 在 PBC 最小镜像下仍 > 10 Å 截断）
+        with open(ml_output / "cg_trajectory.lammpstrj", "w") as f:
+            for i in range(n_frames):
+                f.write("ITEM: TIMESTEP\n")
+                f.write(f"{i * 100}\n")
+                f.write("ITEM: NUMBER OF ATOMS\n4\n")
+                f.write("ITEM: BOX BOUNDS pp pp pp\n")
+                f.write("0.0 20.0\n0.0 20.0\n0.0 20.0\n")
+                f.write("ITEM: ATOMS id type x y z\n")
+                f.write("1 3 1.0 1.0 1.0\n2 5 2.0 1.0 1.0\n3 6 8.0 8.0 8.0\n4 1 5.0 5.0 5.0\n")
+        # 微型 reaction_details.csv
+        cols = ("cycle,atom1_id,atom2_id,atom1_type_before,atom2_type_before,"
+                "atom1_type_after,atom2_type_after,distance,reaction_type,n_angles,n_dihedrals\n")
+        with open(ml_output / "reaction_details.csv", "w") as f:
+            f.write(cols)
+            for cyc, t1, t2 in events:
+                f.write(f"{cyc},1,2,{t1},{t2},1,3,3.5,rxn_X,1,0\n")
+
+    df = collect_per_cycle_counts(
+        [tmp_path / "process1", tmp_path / "process2"], pair_cutoff=10.0, verbose=False
+    )
+    assert list(df["cycle"]) == [1, 2, 3, 4, 5]  # 全局连续编号
+    # process1 cycle1 有一个 3+5 事件
+    row1 = df[df["cycle"] == 1].iloc[0]
+    assert row1["N11"] == 1 and row1["N12"] == 0
+    assert row1["n5"] == 1 and row1["n6"] == 1 and row1["n3"] == 1
+    assert row1["E35"] == 1  # 末端(1,1,1)与单体5(2,1,1)距离 1 < 10
+    assert row1["E36"] == 0  # 单体6 距离 ~12 > 10
+    # process2 的唯一事件落在全局 cycle 4
+    assert df[df["cycle"] == 4].iloc[0]["N12"] == 1
+
+
+def test_collect_per_cycle_counts_frame_mismatch(tmp_path):
+    """帧数与事件 cycle 数不一致时应报错。"""
+    ml_output = tmp_path / "process1" / "ml_output"
+    ml_output.mkdir(parents=True)
+    with open(ml_output / "cg_trajectory.lammpstrj", "w") as f:
+        f.write("ITEM: TIMESTEP\n0\nITEM: NUMBER OF ATOMS\n1\n")
+        f.write("ITEM: BOX BOUNDS pp pp pp\n0.0 10.0\n0.0 10.0\n0.0 10.0\n")
+        f.write("ITEM: ATOMS id type x y z\n1 1 1.0 1.0 1.0\n")
+    with open(ml_output / "reaction_details.csv", "w") as f:
+        f.write("cycle,atom1_id,atom2_id,atom1_type_before,atom2_type_before,"
+                "atom1_type_after,atom2_type_after,distance,reaction_type,n_angles,n_dihedrals\n")
+        f.write("5,1,2,3,5,1,3,3.5,rxn_X,1,0\n")  # cycle 5 > 帧数 1
+    with pytest.raises(ValueError, match="不一致"):
+        collect_per_cycle_counts([tmp_path / "process1"], pair_cutoff=10.0, verbose=False)
