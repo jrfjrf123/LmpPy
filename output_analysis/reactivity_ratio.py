@@ -294,20 +294,68 @@ def beta_intervals(df: pd.DataFrame) -> Dict[str, list]:
     return out
 
 
-def mayo_lewis_fit(win_df: pd.DataFrame) -> Dict[str, float]:
-    """对窗口化 (f1, F1) 数据做微分 Mayo-Lewis 方程 NLLS 拟合。"""
-    from scipy.optimize import curve_fit
+def _mayo_lewis_ode(x: float, y, r1: float, r2: float):
+    """瞬时共聚组成方程(Mayo-Lewis)的转化率积分形式 ODE。
 
-    d = win_df.dropna(subset=["F1"])
-    f1 = d["f1"].to_numpy()
-    F1 = d["F1"].to_numpy()
+    df1/dX = (f1 - F1(f1; r1, r2)) / (1 - X)
+    """
+    f1 = y[0]
+    f2 = 1.0 - f1
+    F1 = (r1 * f1**2 + f1 * f2) / (r1 * f1**2 + 2 * f1 * f2 + r2 * f2**2)
+    return [(f1 - F1) / (1.0 - x)]
 
-    def model(f1, r1, r2):
-        f2 = 1.0 - f1
-        return (r1 * f1**2 + f1 * f2) / (r1 * f1**2 + 2 * f1 * f2 + r2 * f2**2)
 
-    popt, _ = curve_fit(model, f1, F1, p0=[1.0, 1.0], bounds=(0, np.inf))
-    return {"r1_ml": float(popt[0]), "r2_ml": float(popt[1])}
+def mayo_lewis_fit(win_df: pd.DataFrame, f1_0: Optional[float] = None) -> Dict[str, float]:
+    """Meyer-Lowry 积分形式拟合（累计单体消耗轨迹）。
+
+    对窗口化 (X_mid, f1) 数据数值积分瞬时组成方程 ODE,最小二乘拟合 (r1, r2)。
+    相比微分形式(F1 vs f1),积分形式利用整个转化率轨迹,
+    在 f1 动态范围窄时仍保有可辨识性;f1 范围过窄时标记 identifiable=False。
+    """
+    from scipy.integrate import solve_ivp
+    from scipy.optimize import least_squares
+
+    d = win_df.dropna(subset=["f1"]).sort_values("X_mid")
+    if len(d) < 3 or "X_mid" not in d.columns:
+        return {"r1_ml": float("nan"), "r2_ml": float("nan"),
+                "f1_delta": float("nan"), "identifiable": False}
+    X = d["X_mid"].to_numpy()
+    f1_obs = d["f1"].to_numpy()
+    f1_delta = float(f1_obs.max() - f1_obs.min())
+    if f1_0 is None:
+        f1_0 = float(f1_obs[0])
+
+    def resid(params):
+        r1, r2 = params
+        try:
+            sol = solve_ivp(
+                lambda x, y: _mayo_lewis_ode(x, y, r1, r2),
+                [0.0, X[-1]], [f1_0], t_eval=X, rtol=1e-6, atol=1e-9,
+            )
+            return sol.y[0] - f1_obs
+        except Exception:
+            return np.full_like(f1_obs, 1e6)
+
+    best = None
+    for p0 in ([1.0, 1.0], [0.5, 0.5], [2.0, 2.0], [0.3, 3.0]):
+        try:
+            cand = least_squares(
+                resid, p0, bounds=([1e-3, 1e-3], [100.0, 100.0]),
+                xtol=1e-10, ftol=1e-10, gtol=1e-10,
+            )
+        except Exception:
+            continue
+        if best is None or cand.cost < best.cost:
+            best = cand
+    if best is None:
+        return {"r1_ml": float("nan"), "r2_ml": float("nan"),
+                "f1_delta": f1_delta, "identifiable": False}
+    return {
+        "r1_ml": float(best.x[0]),
+        "r2_ml": float(best.x[1]),
+        "f1_delta": f1_delta,
+        "identifiable": bool(f1_delta >= 0.1),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -340,8 +388,8 @@ def plot_r_vs_conversion(
     primary = max(win_tables.keys())
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
     for ax, rkey, title in [
-        (axes[0], "r1", "r1 (E 末端)"),
-        (axes[1], "r2", "r2 (P 末端)"),
+        (axes[0], "r1", "r1 (E chain end)"),
+        (axes[1], "r2", "r2 (P chain end)"),
     ]:
         for nw, wdf in sorted(win_tables.items()):
             alpha = 1.0 if nw == primary else 0.35

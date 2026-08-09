@@ -179,13 +179,42 @@ def test_block_bootstrap_ci_contains_truth():
 
 def test_mayo_lewis_fit_recovers_known_r():
     r1_true, r2_true = 2.0, 0.5
-    f1 = np.linspace(0.1, 0.9, 9)
-    f2 = 1.0 - f1
-    F1 = (r1_true * f1**2 + f1 * f2) / (r1_true * f1**2 + 2 * f1 * f2 + r2_true * f2**2)
-    win_df = pd.DataFrame({"f1": f1, "F1": F1})
-    fit = mayo_lewis_fit(win_df)
-    assert fit["r1_ml"] == pytest.approx(r1_true, rel=1e-3)
-    assert fit["r2_ml"] == pytest.approx(r2_true, rel=1e-3)
+    win = _simulate_mayo_lewis_trajectory(r1_true, r2_true, f1_0=0.3, x_end=0.85)
+    fit = mayo_lewis_fit(win, f1_0=0.3)
+    assert fit["r1_ml"] == pytest.approx(r1_true, rel=0.03)
+    assert fit["r2_ml"] == pytest.approx(r2_true, rel=0.05)
+
+
+def _simulate_mayo_lewis_trajectory(r1, r2, f1_0, x_end=0.6, n=20):
+    """从已知 (r1, r2) 数值积分瞬时组成方程, 生成 (X, f1) 窗口数据。"""
+    from scipy.integrate import solve_ivp
+
+    def ode(x, y):
+        f1 = y[0]
+        f2 = 1.0 - f1
+        F1 = (r1 * f1**2 + f1 * f2) / (r1 * f1**2 + 2 * f1 * f2 + r2 * f2**2)
+        return [(f1 - F1) / (1.0 - x)]
+
+    X = np.linspace(0.001, x_end, n)
+    sol = solve_ivp(ode, [0.001, x_end], [f1_0], t_eval=X, rtol=1e-8, atol=1e-10)
+    return pd.DataFrame({"X_mid": X, "f1": sol.y[0]})
+
+
+def test_mayo_lewis_integral_recovers_known_r():
+    """积分形式(Meyer-Lowry): 窄 f1 域内也应能从 X 轨迹 recover 真值。"""
+    r1_true, r2_true = 2.0, 0.5
+    win = _simulate_mayo_lewis_trajectory(r1_true, r2_true, f1_0=0.3)
+    fit = mayo_lewis_fit(win, f1_0=0.3)
+    assert fit["r1_ml"] == pytest.approx(r1_true, rel=0.03)
+    assert fit["r2_ml"] == pytest.approx(r2_true, rel=0.05)
+
+
+def test_mayo_lewis_identifiability_flag():
+    """f1 动态范围过窄时应标记不可辨识。"""
+    win = _simulate_mayo_lewis_trajectory(1.0, 1.0, f1_0=0.5, x_end=0.1)
+    fit = mayo_lewis_fit(win, f1_0=0.5)
+    assert fit["f1_delta"] < 0.05
+    assert fit["identifiable"] is False
 
 
 from LmpPy.output_analysis.reactivity_ratio import collect_per_cycle_counts
