@@ -247,24 +247,29 @@ def _ensure_mol(current_mol: MolType | None, section: str) -> MolType:
     return current_mol
 
 
-def _add_bonded(mol, rows, n_atoms, section, allowed_funct, min_params, target_list):
+def _add_bonded(mol, rows, n_atoms, section, allowed_funct,
+                min_params, target_list):
     """统一解析 bonds/angles/dihedrals 行。
 
     target_list 为列表时，所有 funct 追加到同一列表；为 dict 时按 funct 分发。
     min_params 可为统一整数或 dict[int, int]。
+
+    allowed_funct 在 target_list 为 dict 且传入 None 时，自动从 dict 的 key
+    推导；target_list 为 list 时调用者必须显式传入允许集合，避免 API 误导。
     """
+    if allowed_funct is None:
+        if isinstance(target_list, dict):
+            allowed_funct = set(target_list.keys())
+        else:
+            raise ValueError(
+                f"[ {section} ] 使用列表 target_list 时必须显式提供 allowed_funct")
+
     for r in rows:
         row = _parse_bonded_row(r, n_atoms, section)
-        if isinstance(target_list, dict):
-            if row.funct not in target_list:
-                raise ValueError(
-                    f"[ {section} ] 不支持的 functype {row.funct}: {r!r}")
-            targets = target_list[row.funct]
-        else:
-            if row.funct not in allowed_funct:
-                raise ValueError(
-                    f"[ {section} ] 不支持的 functype {row.funct}: {r!r}")
-            targets = target_list
+        if row.funct not in allowed_funct:
+            raise ValueError(
+                f"[ {section} ] 不支持的 functype {row.funct}: {r!r}")
+        targets = target_list[row.funct] if isinstance(target_list, dict) else target_list
         need = min_params[row.funct] if isinstance(min_params, dict) else min_params
         _check_params(row, need, section)
         targets.append(row)
@@ -317,8 +322,9 @@ def parse_top(top_path) -> Topology:
         elif name == "molecules":
             for r in rows:
                 t = r.split()
-                if len(t) < 2:
-                    raise ValueError(f"[ molecules ] 行格式不完整: {r!r}")
+                if len(t) != 2:
+                    raise ValueError(
+                        f"[ molecules ] 行需 2 列（分子名 计数）: {r!r}")
                 molecules.append((t[0], int(t[1])))
         elif name == "system":
             continue

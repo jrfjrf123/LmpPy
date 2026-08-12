@@ -316,6 +316,12 @@ class TestParseTop:
         with pytest.raises(ValueError, match="molecules"):
             g2l.parse_top(top)
 
+    def test_molecules_bad_column_count_raises(self, tmp_path):
+        top = tmp_path / "t.top"
+        top.write_text(MINI_TOP.replace("mol     2", "mol"), encoding="utf-8")
+        with pytest.raises(ValueError, match="molecules"):
+            g2l.parse_top(top)
+
     def test_angle_funct_unsupported_raises(self, tmp_path):
         top = tmp_path / "t.top"
         top.write_text(MINI_TOP.replace("1  2  3  1  109.500  836.8",
