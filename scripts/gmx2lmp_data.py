@@ -11,7 +11,7 @@
 - [ atomtypes ] 6 列（name mass charge ptype σ ε）/ 7 列（含 at.num 列）
 - bonds/angles funct 1、dihedrals funct 9/1（proper）、funct 4（improper → cvff）
 - [ molecules ] 多分子计数展开
-- 正交盒；全零盒按坐标范围 + 每边 1 nm（总长 + 2 nm）边距兜底（最小 3 nm）
+- 正交盒；全零盒按坐标范围每边加 1 nm（总长 +2 nm），最小 3 nm
 """
 from __future__ import annotations
 
@@ -156,6 +156,7 @@ def _parse_atomtypes(rows: list[str], comb_rule: int) -> list[AtomType]:
     if comb_rule not in (1, 2):
         raise ValueError(f"不支持的 comb-rule {comb_rule}（仅支持 1/2）")
     types = []
+    seen: set[str] = set()
     for r in rows:
         t = r.split()
         if len(t) == 7:
@@ -164,6 +165,9 @@ def _parse_atomtypes(rows: list[str], comb_rule: int) -> list[AtomType]:
             name, mass, p1, p2 = t[0], float(t[1]), float(t[4]), float(t[5])
         else:
             raise ValueError(f"[ atomtypes ] 行列数异常（需 6 或 7 列）: {r!r}")
+        if name in seen:
+            raise ValueError(f"[ atomtypes ] 中类型 {name!r} 重复定义")
+        seen.add(name)
         if comb_rule == 2:
             sigma_nm, epsilon_kj = p1, p2
         else:
@@ -275,7 +279,7 @@ def _add_bonded(mol, rows, n_atoms, section, allowed_funct,
         targets.append(row)
 
 
-def parse_top(top_path) -> Topology:
+def parse_top(top_path: Path | str) -> Topology:
     """解析 top（含 #include 展开）为 Topology。
 
     functype 边界：bonds/angles 仅 funct 1；dihedrals funct 9/1 → proper、
@@ -375,7 +379,9 @@ class System:
     improper_coeffs: dict = field(default_factory=dict)
 
 
-def build_system(topo: Topology, coords: list, box: list[float]) -> System:
+def build_system(topo: Topology,
+                 coords: list[tuple[float, float, float]],
+                 box: list[float]) -> System:
     """按 [ molecules ] 展开全局体系；校验原子数、零盒兜底、越界告警。"""
     n_expected = sum(len(topo.mol_types[name].atoms) * count
                      for name, count in topo.molecules)
@@ -457,8 +463,9 @@ def _phase_sign(phase: float, pn: int, label: str) -> int:
     return sign
 
 
-def write_lmp_data(system: System, atom_types: list, defaults: Defaults,
-                   out_path, title: str = "GROMACS → LAMMPS data (gmx2lmp_data)") -> None:
+def write_lmp_data(system: System, atom_types: list[AtomType], defaults: Defaults,
+                   out_path: Path | str,
+                   title: str = "GROMACS → LAMMPS data (gmx2lmp_data)") -> None:
     """写出 LAMMPS data（real 单位，atom_style full）。
 
     换算（与 pre_data_gen/scripts/convert_to_lmp.py 已验证公式一致）：

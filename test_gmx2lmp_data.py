@@ -71,24 +71,27 @@ class TestParseGro:
         assert box == [0.0, 0.0, 0.0]
 
     def test_fallback_5_decimal_precision(self, tmp_path):
-        """5 位小数列宽变体触发兜底分支，必须保留完整精度。"""
+        """5 位小数 + atomname/atomnr 粘连导致固定列宽切片无法解析，必须进兜底分支。
+
+        行内仅留单个空格分隔原子令牌与坐标，使 ``line[20:28]`` 等固定切片
+        跨域非数值字符（如 ``'00  6.35'``），从而强制按空白切分读取完整精度。
+        """
         gro = tmp_path / "5dec.gro"
         gro.write_text(
             "5dec\n"
             "2\n"
-            "    1UNL    H9449980  6.60700  6.35300  2.71700\n"
-            "    1UNL    H9449981  1.00001  2.00002  3.00003\n"
+            "    1UNLH10000 6.60700  6.35300  2.71700\n"
+            "    1UNLH10001 1.00001  2.00002  3.00003\n"
             "  10.35573  10.35573  10.35573\n",
             encoding="utf-8",
         )
         coords, box = g2l.parse_gro(gro)
-        # 第二行固定列宽切片会截断，兜底分支读取完整 5 位小数
-        assert coords[1] == pytest.approx(
-            (1.00001 * 10.0, 2.00002 * 10.0, 3.00003 * 10.0)
-        )
-        # 第一行 likewise 验证兜底把 6.60700 等完整读入
+        # 兜底分支必须保留 5 位小数完整精度
         assert coords[0] == pytest.approx(
             (6.60700 * 10.0, 6.35300 * 10.0, 2.71700 * 10.0)
+        )
+        assert coords[1] == pytest.approx(
+            (1.00001 * 10.0, 2.00002 * 10.0, 3.00003 * 10.0)
         )
         assert box == pytest.approx([103.5573] * 3)
 
@@ -189,6 +192,13 @@ class TestTopInfrastructure:
     def test_atomtypes_bad_column_count_raises(self):
         with pytest.raises(ValueError, match="atomtypes"):
             g2l._parse_atomtypes(["c3 12.011 0.0"], comb_rule=2)
+
+    def test_atomtypes_duplicate_raises(self):
+        with pytest.raises(ValueError, match="重复定义"):
+            g2l._parse_atomtypes(
+                ["c3 6 12.011 0.0 A 0.34 0.4184",
+                 "c3 6 12.011 0.0 A 0.34 0.4184"],
+                comb_rule=2)
 
 
 MINI_TOP = """\
@@ -639,6 +649,9 @@ def test_chain_matches_mdfmt_route(tmp_path):
         ref_rows = [[float(x) for x in r.split()] for r in ref["sections"][sec]]
         new_rows = [[float(x) for x in r.split()] for r in new["sections"][sec]]
         assert len(new_rows) == len(ref_rows), sec
+        # 按 (type_id, params...) 排序后再逐项比较，避免依赖写入顺序
+        ref_rows = sorted(ref_rows, key=lambda r: [r[0]] + r[1:])
+        new_rows = sorted(new_rows, key=lambda r: [r[0]] + r[1:])
         for nrow, rrow in zip(new_rows, ref_rows):
             assert nrow == pytest.approx(rrow, rel=1e-3, abs=1e-6), sec
 

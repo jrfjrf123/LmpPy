@@ -654,12 +654,22 @@ python LmpPy/scripts/gmx2lmp_data.py --top system.top --gro conf.gro -o out.data
     --type-order type_order.txt   # 可选：输出 类型号=GAFF类型名 映射
 ```
 
+**参数：**
+
+| 参数 | 说明 | 必需 |
+|------|------|------|
+| `--top PATH` | GROMACS `.top` 文件路径（可含 `#include` itp） | 是 |
+| `--gro PATH` | GROMACS `.gro` 文件路径（正交盒） | 是 |
+| `-o` / `--out PATH` | 输出 LAMMPS `.data` 文件路径 | 是 |
+| `--type-order PATH` | 可选：输出 `类型号=GAFF类型名` 映射文件 | 否 |
+
 **支持范围：**
 
 - 递归 `#include`（相对包含文件所在目录）；`[ molecules ]` 多分子计数展开
 - `[ atomtypes ]` 6 列 / 7 列（含 at.num）两种格式；comb-rule 1（C6/C12 自动换算 σ/ε）与 comb-rule 2
 - bonds/angles funct 1、dihedrals funct 9/1（proper，多 term 保留叠加）、funct 4（improper → cvff）
-- 正交盒；全零盒按坐标范围 + 1 nm 边距兜底（最小 3 nm）
+- 正交盒；全零盒按坐标范围每边加 1 nm（总长 +2 nm），最小 3 nm
+- `Masses` 段使用 `[ atomtypes ]` 质量，`[ atoms ]` 行的质量覆盖仅作校验/告警
 - 不支持的 functype（2/3/5/10 等）报错退出；`[ pairs ]`/`[ constraints ]` 等段跳过并告警（1-4 缩放由输出文件头注释建议的 `special_bonds` 覆盖）
 
 输出文件头注释列出了所需的 `pair_style`/`bond_style` 等 LAMMPS 设置与 `special_bonds` 建议值，直接照抄到输入脚本即可。
@@ -675,6 +685,8 @@ _project_root = Path(__file__).resolve().parent.parent.parent
 if _project_root not in sys.path:
     sys.path.insert(0, str(_project_root))
 ```
+
+例外：`gmx2lmp_data.py` 是纯 Python 标准库脚本，不依赖跨仓库导入，因此内部无 `sys.path` 处理；直接运行或模块方式均可。
 
 因此两种运行方式均支持：
 
