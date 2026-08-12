@@ -463,3 +463,69 @@ class TestWriteNonbonded:
         assert float(rows[0][3]) == pytest.approx(0.1)
         assert float(rows[0][4]) == pytest.approx(10.0)
         assert rows[8][1] == "3" and rows[9][1] == "4"  # single 分子的 mol_id
+
+
+class TestBondedSections:
+    def test_coeff_values(self, tmp_path):
+        """MINI 体系的取整参数 → 精确换算值。
+
+        bond k=83680 → K=83680/836.8=100.0, r0=0.15nm→1.5Å / 0.109nm→1.09Å
+        angle k=836.8 → K=836.8/(2·4.184)=100.0, θ0=109.5
+        dihedral phase=180 kd=4.184 pn=-3 → K=1.0, sign=+1（180→-1，pn<0 再翻）, n=3
+        improper phase=0 kd=8.368 pn=2 → K=2.0, d=+1, n=2
+        """
+        topo, system = _build_mini_system(tmp_path)
+        out = tmp_path / "out.data"
+        g2l.write_lmp_data(system, topo.atom_types, topo.defaults, out)
+        lines = out.read_text(encoding="utf-8").splitlines()
+
+        bi = next(i for i, l in enumerate(lines) if l.startswith("Bond Coeffs"))
+        assert lines[bi + 2].split() == ["1", "100.000", "1.5000"]
+        assert lines[bi + 3].split() == ["2", "100.000", "1.0900"]
+
+        ai = next(i for i, l in enumerate(lines) if l.startswith("Angle Coeffs"))
+        assert lines[ai + 2].split() == ["1", "100.000", "109.500"]
+
+        di = next(i for i, l in enumerate(lines) if l.startswith("Dihedral Coeffs"))
+        assert lines[di + 2].split() == ["1", "1.000", "1", "3"]
+        assert lines[di + 3].split() == ["2", "0.500", "1", "1"]  # kd=2.092 → 0.5
+
+        ii = next(i for i, l in enumerate(lines) if l.startswith("Improper Coeffs"))
+        assert lines[ii + 2].split() == ["1", "2.000", "1", "2"]
+
+    def test_topology_sections(self, tmp_path):
+        topo, system = _build_mini_system(tmp_path)
+        out = tmp_path / "out.data"
+        g2l.write_lmp_data(system, topo.atom_types, topo.defaults, out)
+        lines = out.read_text(encoding="utf-8").splitlines()
+
+        bi = next(i for i, l in enumerate(lines) if l == "Bonds")
+        rows = [l.split() for l in lines[bi + 2:bi + 8]]
+        # id type i j；第一实例键 1-2/2-3(type 1)、3-4(type 2)，第二实例 +4
+        assert rows[0] == ["1", "1", "1", "2"]
+        assert rows[2] == ["3", "2", "3", "4"]
+        assert rows[3] == ["4", "1", "5", "6"]
+        assert rows[5] == ["6", "2", "7", "8"]
+
+        di = next(i for i, l in enumerate(lines) if l == "Dihedrals")
+        rows = [l.split() for l in lines[di + 2:di + 6]]
+        # 多 term 同四元组保留为多条目（type 1、2 各一条 × 2 实例）
+        assert rows[0] == ["1", "1", "1", "2", "3", "4"]
+        assert rows[1] == ["2", "2", "1", "2", "3", "4"]
+        assert rows[2] == ["3", "1", "5", "6", "7", "8"]
+
+        ii = next(i for i, l in enumerate(lines) if l == "Impropers")
+        rows = [l.split() for l in lines[ii + 2:ii + 4]]
+        assert rows[0] == ["1", "1", "1", "2", "3", "4"]
+        assert rows[1] == ["2", "1", "5", "6", "7", "8"]
+
+    def test_nonstandard_phase_warns(self, tmp_path):
+        top, gro = _write_mini(tmp_path)
+        top.write_text(MINI_TOP.replace("9  180.0  4.184  -3", "9  90.0  4.184  3"),
+                       encoding="utf-8")
+        topo = g2l.parse_top(top)
+        coords, box = g2l.parse_gro(gro)
+        system = g2l.build_system(topo, coords, box)
+        with pytest.warns(UserWarning, match="相位"):
+            g2l.write_lmp_data(system, topo.atom_types, topo.defaults,
+                               tmp_path / "out.data")

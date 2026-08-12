@@ -506,10 +506,47 @@ def write_lmp_data(system: System, atom_types: list, defaults: Defaults,
     for i, t in enumerate(atom_types, 1):
         L.append(f"{i} {t.epsilon_kj / KCAL_PER_KJ:.6e} {t.sigma_nm * 10.0:.6f}")
 
-    # --- bonded Coeffs（Task 6 补全） ---
+    if system.bond_coeffs:
+        L += ["", "Bond Coeffs # harmonic", ""]
+        for (r0_nm, k), tid in system.bond_coeffs.items():
+            L.append(f"{tid} {k / (2.0 * KCAL_PER_KJ * 100.0):.3f} {r0_nm * 10.0:.4f}")
+
+    if system.angle_coeffs:
+        L += ["", "Angle Coeffs # harmonic", ""]
+        for (a0, k), tid in system.angle_coeffs.items():
+            L.append(f"{tid} {k / (2.0 * KCAL_PER_KJ):.3f} {a0:.3f}")
+
+    if system.dihedral_coeffs:
+        L += ["", "Dihedral Coeffs # harmonic", ""]
+        for (phase, kd, pn), tid in system.dihedral_coeffs.items():
+            sign = _phase_sign(phase, pn, f"dihedral 类型 {tid}")
+            L.append(f"{tid} {kd / KCAL_PER_KJ:.3f} {sign} {abs(pn)}")
+
+    if system.improper_coeffs:
+        L += ["", "Improper Coeffs # cvff", ""]
+        for (phase, kd, pn), tid in system.improper_coeffs.items():
+            d = _phase_sign(phase, pn, f"improper 类型 {tid}")
+            L.append(f"{tid} {kd / KCAL_PER_KJ:.3f} {d} {abs(pn)}")
+
     L += ["", "Atoms # full", ""]
     for i, (mol_id, tid, q, x, y, z) in enumerate(system.atoms, 1):
         L.append(f"{i} {mol_id} {tid} {q:.8f} {x:.6f} {y:.6f} {z:.6f}")
 
-    # --- 拓扑段（Task 6 补全） ---
+    if system.bonds:
+        L += ["", "Bonds", ""]
+        for i, (tid, a, b) in enumerate(system.bonds, 1):
+            L.append(f"{i} {tid} {a} {b}")
+    if system.angles:
+        L += ["", "Angles", ""]
+        for i, (tid, a, b, c) in enumerate(system.angles, 1):
+            L.append(f"{i} {tid} {a} {b} {c}")
+    if system.dihedrals:
+        L += ["", "Dihedrals", ""]
+        for i, (tid, a, b, c, d) in enumerate(system.dihedrals, 1):
+            L.append(f"{i} {tid} {a} {b} {c} {d}")
+    if system.impropers:
+        L += ["", "Impropers", ""]
+        for i, (tid, a, b, c, d) in enumerate(system.impropers, 1):
+            L.append(f"{i} {tid} {a} {b} {c} {d}")
+
     Path(out_path).write_text("\n".join(L) + "\n", encoding="utf-8")
