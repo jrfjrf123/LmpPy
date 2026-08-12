@@ -16,10 +16,10 @@
 from __future__ import annotations
 
 import argparse  # noqa: F401
-import re  # noqa: F401
+import re
 import sys  # noqa: F401
 import warnings  # noqa: F401
-from dataclasses import dataclass  # noqa: F401
+from dataclasses import dataclass
 from dataclasses import field  # noqa: F401
 from pathlib import Path
 
@@ -31,7 +31,9 @@ GRO_X_SLICE = slice(20, 28)
 GRO_Y_SLICE = slice(28, 36)
 GRO_Z_SLICE = slice(36, 44)
 
-# 兜底分支：按空白切分时，含速度列的典型令牌数（8=无残基号？10=含速度）
+# 兜底分支：按空白切分 gro 原子行时，速度列存在意味着行尾还有 3 个速度分量。
+# 此时坐标列之前若包含残基号则有 10 个令牌，某些简写格式无残基号则为 8 个；
+# 无速度列时令牌数小于 8，直接取末尾 3 列作为坐标。
 GRO_TOKEN_COUNTS_WITH_VELOCITY = frozenset({8, 10})
 
 
@@ -127,6 +129,8 @@ class Defaults:
 
 
 def _parse_defaults(rows: list[str]) -> Defaults:
+    if not rows:
+        raise ValueError("[ defaults ] 段为空")
     t = rows[0].split()
     if len(t) < 5:
         raise ValueError(f"[ defaults ] 行格式不完整（需 5 列）: {rows[0]!r}")

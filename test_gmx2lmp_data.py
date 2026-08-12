@@ -154,6 +154,10 @@ class TestTopInfrastructure:
         assert d.fudge_lj == 0.5
         assert d.fudge_qq == pytest.approx(0.8333)
 
+    def test_parse_defaults_empty_raises(self):
+        with pytest.raises(ValueError, match="defaults ] 段为空"):
+            g2l._parse_defaults([])
+
     def test_atomtypes_7col_with_atnum(self):
         types = g2l._parse_atomtypes(
             ["c3 6 12.010736 0.000000 A 3.397710E-01 4.510352E-01"], comb_rule=2)
