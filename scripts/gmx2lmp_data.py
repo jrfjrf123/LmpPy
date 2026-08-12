@@ -352,3 +352,92 @@ def parse_top(top_path) -> Topology:
 
     return Topology(defaults=defaults, atom_types=atom_types,
                     mol_types=mol_types, molecules=molecules)
+
+
+@dataclass
+class System:
+    """展开后的全局体系（原子/拓扑均为全局 1-based id）。
+
+    coeffs 表：参数元组 → 类型号（按首次出现顺序，同参数合并同类型）。
+      bond: (r0_nm, k)  angle: (a0_deg, k)  dihedral/improper: (phase, kd, pn)
+    """
+    box: list
+    atoms: list = field(default_factory=list)        # (mol_id, type_id, q, x, y, z)
+    bonds: list = field(default_factory=list)        # (type_id, i, j)
+    angles: list = field(default_factory=list)       # (type_id, i, j, k)
+    dihedrals: list = field(default_factory=list)    # (type_id, i, j, k, l)
+    impropers: list = field(default_factory=list)    # (type_id, i, j, k, l)
+    bond_coeffs: dict = field(default_factory=dict)
+    angle_coeffs: dict = field(default_factory=dict)
+    dihedral_coeffs: dict = field(default_factory=dict)
+    improper_coeffs: dict = field(default_factory=dict)
+
+
+def build_system(topo: Topology, coords: list, box: list) -> System:
+    """按 [ molecules ] 展开全局体系；校验原子数、零盒兜底、越界告警。"""
+    n_expected = sum(len(topo.mol_types[name].atoms) * count
+                     for name, count in topo.molecules)
+    if len(coords) != n_expected:
+        raise ValueError(
+            f"gro 原子数 {len(coords)} 与 top 展开原子数 {n_expected} 不一致")
+
+    box = list(box)
+    if all(b == 0.0 for b in box):
+        xs, ys, zs = zip(*coords)
+        box = [max(max(c) - min(c) + 20.0, 30.0) for c in (xs, ys, zs)]
+        warnings.warn("gro 盒尺寸全为 0，按坐标范围 + 1 nm 边距生成默认正交盒"
+                      f"（最小 3 nm）: {box}")
+
+    xs, ys, zs = zip(*coords)
+    for lo, hi, L, axis in ((min(xs), max(xs), box[0], "x"),
+                            (min(ys), max(ys), box[1], "y"),
+                            (min(zs), max(zs), box[2], "z")):
+        if lo < 0.0 or hi > L:
+            warnings.warn(f"存在原子坐标超出 {axis} 盒范围 [0, {L:.3f}] Å，"
+                          "data 盒边界仍写 [0, L]，请自行确认")
+            break
+
+    type_id_of = {t.name: i + 1 for i, t in enumerate(topo.atom_types)}
+    system = System(box=box)
+    offset = 0
+    mol_id = 0
+    coord_idx = 0
+    mass_mismatch = 0
+    for name, count in topo.molecules:
+        mol = topo.mol_types[name]
+        for _ in range(count):
+            mol_id += 1
+            for a in mol.atoms:
+                tid = type_id_of[a.type_name]
+                if a.mass is not None and abs(a.mass - topo.atom_types[tid - 1].mass) > 1e-6:
+                    mass_mismatch += 1
+                x, y, z = coords[coord_idx]
+                coord_idx += 1
+                system.atoms.append((mol_id, tid, a.charge, x, y, z))
+            for row in mol.bonds:
+                key = (float(row.params[0]), float(row.params[1]))
+                tid = system.bond_coeffs.setdefault(key, len(system.bond_coeffs) + 1)
+                system.bonds.append((tid, row.atoms[0] + offset, row.atoms[1] + offset))
+            for row in mol.angles:
+                key = (float(row.params[0]), float(row.params[1]))
+                tid = system.angle_coeffs.setdefault(key, len(system.angle_coeffs) + 1)
+                system.angles.append(
+                    (tid, *(a + offset for a in row.atoms)))
+            for row in mol.dihedrals:
+                key = (float(row.params[0]), float(row.params[1]), int(row.params[2]))
+                tid = system.dihedral_coeffs.setdefault(
+                    key, len(system.dihedral_coeffs) + 1)
+                system.dihedrals.append(
+                    (tid, *(a + offset for a in row.atoms)))
+            for row in mol.impropers:
+                key = (float(row.params[0]), float(row.params[1]), int(row.params[2]))
+                tid = system.improper_coeffs.setdefault(
+                    key, len(system.improper_coeffs) + 1)
+                system.impropers.append(
+                    (tid, *(a + offset for a in row.atoms)))
+            offset += len(mol.atoms)
+
+    if mass_mismatch:
+        warnings.warn(f"{mass_mismatch} 个原子的 atoms 行质量与 atomtype 质量不一致，"
+                      "Masses 段按 atomtype 质量写出")
+    return system

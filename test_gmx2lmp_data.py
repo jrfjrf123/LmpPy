@@ -347,3 +347,61 @@ class TestParseTop:
         )
         with pytest.raises(ValueError, match="出现在任何"):
             g2l.parse_top(top)
+
+
+class TestBuildSystem:
+    def test_expansion_offsets_and_mol_ids(self, tmp_path):
+        top, gro = _write_mini(tmp_path)
+        topo = g2l.parse_top(top)
+        coords, box = g2l.parse_gro(gro)
+        system = g2l.build_system(topo, coords, box)
+        # 2 mol × 4 原子 + 2 single × 1 原子 = 10
+        assert len(system.atoms) == 10
+        # atoms: (mol_id, type_id, charge, x, y, z)
+        assert system.atoms[0][0] == 1 and system.atoms[3][0] == 1
+        assert system.atoms[4][0] == 2 and system.atoms[7][0] == 2
+        assert system.atoms[8][0] == 3 and system.atoms[9][0] == 4
+        assert system.atoms[0][1] == 1  # c3
+        assert system.atoms[3][1] == 2  # hc
+        assert system.atoms[1][2] == pytest.approx(-0.2)
+        assert system.atoms[4][3] == pytest.approx(20.0)  # x Å
+        # 第二个 mol 实例的键指向全局 id 5-8
+        assert system.bonds[3] == (1, 5, 6)
+        assert system.dihedrals[2][1:] == (5, 6, 7, 8)
+        # 同参数合并同类型：3 条键两种参数 → 2 个 bond type
+        assert len(system.bond_coeffs) == 2
+        assert len(system.bonds) == 6
+        assert len(system.angles) == 4
+        assert len(system.dihedrals) == 4   # 2 term × 2 实例
+        assert len(system.impropers) == 2
+
+    def test_atom_count_mismatch_raises(self, tmp_path):
+        top, gro = _write_mini(tmp_path)
+        gro.write_text(MINI_GRO.replace("10\n", "9\n", 1).replace(
+            "    4SOL     H1   10   3.500   3.500   3.500\n", ""), encoding="utf-8")
+        topo = g2l.parse_top(top)
+        coords, box = g2l.parse_gro(gro)
+        with pytest.raises(ValueError, match="不一致"):
+            g2l.build_system(topo, coords, box)
+
+    def test_zero_box_fallback(self, tmp_path):
+        top, gro = _write_mini(tmp_path)
+        gro.write_text(MINI_GRO.replace(
+            "   5.00000   5.00000   5.00000\n",
+            "   0.00000   0.00000   0.00000\n"), encoding="utf-8")
+        topo = g2l.parse_top(top)
+        coords, box = g2l.parse_gro(gro)
+        with pytest.warns(UserWarning, match="全为 0"):
+            system = g2l.build_system(topo, coords, box)
+        # x 范围 10..35 Å → 25 + 20 = 45 Å；y/z 同理
+        assert system.box == pytest.approx([45.0, 45.0, 45.0])
+
+    def test_atom_mass_override_warns(self, tmp_path):
+        top, gro = _write_mini(tmp_path)
+        top.write_text(MINI_TOP.replace("1  c3  1  MOL  C1  1  0.10000000  12.011",
+                                        "1  c3  1  MOL  C1  1  0.10000000  13.500"),
+                       encoding="utf-8")
+        topo = g2l.parse_top(top)
+        coords, box = g2l.parse_gro(gro)
+        with pytest.warns(UserWarning, match="质量"):
+            g2l.build_system(topo, coords, box)
