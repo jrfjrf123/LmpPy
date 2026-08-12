@@ -11,7 +11,7 @@
 - [ atomtypes ] 6 列（name mass charge ptype σ ε）/ 7 列（含 at.num 列）
 - bonds/angles funct 1、dihedrals funct 9/1（proper）、funct 4（improper → cvff）
 - [ molecules ] 多分子计数展开
-- 正交盒；全零盒按坐标范围 + 1 nm 边距兜底（最小 3 nm）
+- 正交盒；全零盒按坐标范围 + 每边 1 nm（总长 + 2 nm）边距兜底（最小 3 nm）
 """
 from __future__ import annotations
 
@@ -196,11 +196,11 @@ class BondedRow:
 @dataclass
 class MolType:
     name: str
-    atoms: list = field(default_factory=list)
-    bonds: list = field(default_factory=list)
-    angles: list = field(default_factory=list)
-    dihedrals: list = field(default_factory=list)   # funct 9/1（proper）
-    impropers: list = field(default_factory=list)   # funct 4
+    atoms: list[MolAtom] = field(default_factory=list)
+    bonds: list[BondedRow] = field(default_factory=list)
+    angles: list[BondedRow] = field(default_factory=list)
+    dihedrals: list[BondedRow] = field(default_factory=list)   # funct 9/1（proper）
+    impropers: list[BondedRow] = field(default_factory=list)   # funct 4
 
 
 @dataclass
@@ -358,10 +358,12 @@ def parse_top(top_path) -> Topology:
 class System:
     """展开后的全局体系（原子/拓扑均为全局 1-based id）。
 
+    box 由调用方提供；build_system 内部会执行 ``list(box)`` 拷贝，避免修改外部对象。
+
     coeffs 表：参数元组 → 类型号（按首次出现顺序，同参数合并同类型）。
       bond: (r0_nm, k)  angle: (a0_deg, k)  dihedral/improper: (phase, kd, pn)
     """
-    box: list
+    box: list[float]
     atoms: list = field(default_factory=list)        # (mol_id, type_id, q, x, y, z)
     bonds: list = field(default_factory=list)        # (type_id, i, j)
     angles: list = field(default_factory=list)       # (type_id, i, j, k)
@@ -373,7 +375,7 @@ class System:
     improper_coeffs: dict = field(default_factory=dict)
 
 
-def build_system(topo: Topology, coords: list, box: list) -> System:
+def build_system(topo: Topology, coords: list, box: list[float]) -> System:
     """按 [ molecules ] 展开全局体系；校验原子数、零盒兜底、越界告警。"""
     n_expected = sum(len(topo.mol_types[name].atoms) * count
                      for name, count in topo.molecules)
@@ -385,8 +387,8 @@ def build_system(topo: Topology, coords: list, box: list) -> System:
     if all(b == 0.0 for b in box):
         xs, ys, zs = zip(*coords)
         box = [max(max(c) - min(c) + 20.0, 30.0) for c in (xs, ys, zs)]
-        warnings.warn("gro 盒尺寸全为 0，按坐标范围 + 1 nm 边距生成默认正交盒"
-                      f"（最小 3 nm）: {box}")
+        warnings.warn("gro 盒尺寸全为 0，按坐标范围 + 每边 1 nm（总长 + 2 nm）"
+                      f"边距生成默认正交盒（最小 3 nm）: {box}")
 
     xs, ys, zs = zip(*coords)
     for lo, hi, L, axis in ((min(xs), max(xs), box[0], "x"),
@@ -407,6 +409,8 @@ def build_system(topo: Topology, coords: list, box: list) -> System:
         mol = topo.mol_types[name]
         for _ in range(count):
             mol_id += 1
+            base = offset           # 当前分子实例的原子索引基准偏移
+            offset += len(mol.atoms)  # 与 mol_id 一起自增，维护位置统一
             for a in mol.atoms:
                 tid = type_id_of[a.type_name]
                 if a.mass is not None and abs(a.mass - topo.atom_types[tid - 1].mass) > 1e-6:
@@ -417,25 +421,24 @@ def build_system(topo: Topology, coords: list, box: list) -> System:
             for row in mol.bonds:
                 key = (float(row.params[0]), float(row.params[1]))
                 tid = system.bond_coeffs.setdefault(key, len(system.bond_coeffs) + 1)
-                system.bonds.append((tid, row.atoms[0] + offset, row.atoms[1] + offset))
+                system.bonds.append((tid, row.atoms[0] + base, row.atoms[1] + base))
             for row in mol.angles:
                 key = (float(row.params[0]), float(row.params[1]))
                 tid = system.angle_coeffs.setdefault(key, len(system.angle_coeffs) + 1)
                 system.angles.append(
-                    (tid, *(a + offset for a in row.atoms)))
+                    (tid, *(a + base for a in row.atoms)))
             for row in mol.dihedrals:
                 key = (float(row.params[0]), float(row.params[1]), int(row.params[2]))
                 tid = system.dihedral_coeffs.setdefault(
                     key, len(system.dihedral_coeffs) + 1)
                 system.dihedrals.append(
-                    (tid, *(a + offset for a in row.atoms)))
+                    (tid, *(a + base for a in row.atoms)))
             for row in mol.impropers:
                 key = (float(row.params[0]), float(row.params[1]), int(row.params[2]))
                 tid = system.improper_coeffs.setdefault(
                     key, len(system.improper_coeffs) + 1)
                 system.impropers.append(
-                    (tid, *(a + offset for a in row.atoms)))
-            offset += len(mol.atoms)
+                    (tid, *(a + base for a in row.atoms)))
 
     if mass_mismatch:
         warnings.warn(f"{mass_mismatch} 个原子的 atoms 行质量与 atomtype 质量不一致，"
