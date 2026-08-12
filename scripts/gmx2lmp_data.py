@@ -15,9 +15,9 @@
 """
 from __future__ import annotations
 
-import argparse  # noqa: F401
+import argparse
 import re
-import sys  # noqa: F401
+import sys
 import warnings  # noqa: F401
 from dataclasses import dataclass
 from dataclasses import field  # noqa: F401
@@ -550,3 +550,46 @@ def write_lmp_data(system: System, atom_types: list, defaults: Defaults,
             L.append(f"{i} {tid} {a} {b} {c} {d}")
 
     Path(out_path).write_text("\n".join(L) + "\n", encoding="utf-8")
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description="GROMACS top+gro → LAMMPS data（GAFF，real 单位，atom_style full）")
+    ap.add_argument("--top", required=True, help="GROMACS .top（可含 #include itp）")
+    ap.add_argument("--gro", required=True, help="GROMACS .gro（正交盒）")
+    ap.add_argument("-o", "--out", required=True, help="输出 LAMMPS data 路径")
+    ap.add_argument("--type-order", default=None,
+                    help="可选：输出 类型号=GAFF类型名 映射文件")
+    args = ap.parse_args(argv)
+
+    try:
+        topo = parse_top(args.top)
+        coords, box = parse_gro(args.gro)
+        system = build_system(topo, coords, box)
+    except (ValueError, FileNotFoundError) as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 2
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    write_lmp_data(system, topo.atom_types, topo.defaults, out_path,
+                   title=f"converted from {Path(args.top).name} + "
+                         f"{Path(args.gro).name} (gmx2lmp_data)")
+
+    if all(a[2] == 0.0 for a in system.atoms):
+        print("警告: 所有原子电荷为 0，请检查 top/itp 电荷设置", file=sys.stderr)
+
+    if args.type_order:
+        order = ",".join(f"{i + 1}={t.name}" for i, t in enumerate(topo.atom_types))
+        Path(args.type_order).write_text(
+            f"{Path(args.top).stem}: {order}\n", encoding="utf-8")
+
+    print(f"转换完成: {out_path}")
+    print(f"  原子 {len(system.atoms)}，键 {len(system.bonds)}，"
+          f"角 {len(system.angles)}，二面角 {len(system.dihedrals)}，"
+          f"不二面角 {len(system.impropers)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

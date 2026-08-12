@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """gmx2lmp_data 的 pytest 测试。"""
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -529,3 +531,47 @@ class TestBondedSections:
         with pytest.warns(UserWarning, match="相位"):
             g2l.write_lmp_data(system, topo.atom_types, topo.defaults,
                                tmp_path / "out.data")
+
+
+SCRIPT = Path(__file__).resolve().parent / "scripts" / "gmx2lmp_data.py"
+
+
+class TestCli:
+    def _run(self, *argv):
+        return subprocess.run([sys.executable, str(SCRIPT), *argv],
+                              capture_output=True, text=True)
+
+    def test_smoke(self, tmp_path):
+        top, gro = _write_mini(tmp_path)
+        out = tmp_path / "out.data"
+        r = self._run("--top", str(top), "--gro", str(gro), "-o", str(out))
+        assert r.returncode == 0, r.stderr
+        assert out.exists()
+        assert "10 atoms" in out.read_text(encoding="utf-8")
+
+    def test_type_order_file(self, tmp_path):
+        top, gro = _write_mini(tmp_path)
+        order = tmp_path / "type_order.txt"
+        r = self._run("--top", str(top), "--gro", str(gro),
+                      "-o", str(tmp_path / "out.data"),
+                      "--type-order", str(order))
+        assert r.returncode == 0, r.stderr
+        assert order.read_text(encoding="utf-8") == "mini: 1=c3,2=hc\n"
+
+    def test_bad_input_exit_2(self, tmp_path):
+        top, gro = _write_mini(tmp_path)
+        top.write_text(MINI_TOP.split("[ molecules ]")[0], encoding="utf-8")
+        r = self._run("--top", str(top), "--gro", str(gro),
+                      "-o", str(tmp_path / "out.data"))
+        assert r.returncode == 2
+        assert "molecules" in r.stderr
+
+    def test_zero_charge_warning(self, tmp_path):
+        top, gro = _write_mini(tmp_path)
+        zeroed = re.sub(r"(-?\d+\.\d{8})(  \d+\.\d+)?$", "0.00000000\\2",
+                        MINI_TOP, flags=re.MULTILINE)
+        top.write_text(zeroed, encoding="utf-8")
+        r = self._run("--top", str(top), "--gro", str(gro),
+                      "-o", str(tmp_path / "out.data"))
+        assert r.returncode == 0, r.stderr
+        assert "电荷为 0" in r.stderr
