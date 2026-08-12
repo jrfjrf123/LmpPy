@@ -176,3 +176,160 @@ def _parse_atomtypes(rows: list[str], comb_rule: int) -> list[AtomType]:
         types.append(AtomType(name=name, mass=mass,
                               sigma_nm=sigma_nm, epsilon_kj=epsilon_kj))
     return types
+
+
+@dataclass
+class MolAtom:
+    nr: int
+    type_name: str
+    charge: float
+    mass: float | None = None  # atoms 行 8 列时的质量覆盖；None 用 atomtype 质量
+
+
+@dataclass
+class BondedRow:
+    atoms: tuple          # 分子内 1-based 原子序号
+    funct: int
+    params: tuple         # 参数列原文（换算时转 float/int）
+
+
+@dataclass
+class MolType:
+    name: str
+    atoms: list = field(default_factory=list)
+    bonds: list = field(default_factory=list)
+    angles: list = field(default_factory=list)
+    dihedrals: list = field(default_factory=list)   # funct 9/1（proper）
+    impropers: list = field(default_factory=list)   # funct 4
+
+
+@dataclass
+class Topology:
+    defaults: Defaults
+    atom_types: list                 # 顺序即 LAMMPS atom type 号
+    mol_types: dict
+    molecules: list                  # [(分子名, 计数)]，[ molecules ] 顺序
+
+
+def _parse_atom_row(r: str) -> MolAtom:
+    t = r.split()
+    if len(t) == 8:
+        return MolAtom(nr=int(t[0]), type_name=t[1],
+                       charge=float(t[6]), mass=float(t[7]))
+    if len(t) == 7:
+        return MolAtom(nr=int(t[0]), type_name=t[1], charge=float(t[6]))
+    raise ValueError(f"[ atoms ] 行列数异常（需 7 或 8 列）: {r!r}")
+
+
+def _parse_bonded_row(r: str, n_atoms: int, section: str) -> BondedRow:
+    t = r.split()
+    if len(t) < n_atoms + 1:
+        raise ValueError(f"[ {section} ] 行列数不足: {r!r}")
+    try:
+        atoms = tuple(int(x) for x in t[:n_atoms])
+        funct = int(t[n_atoms])
+    except ValueError:
+        raise ValueError(f"[ {section} ] 行解析失败: {r!r}") from None
+    return BondedRow(atoms=atoms, funct=funct, params=tuple(t[n_atoms + 1:]))
+
+
+def _check_params(row: BondedRow, need: int, section: str) -> None:
+    if len(row.params) < need:
+        raise ValueError(
+            f"[ {section} ] funct {row.funct} 需 {need} 个参数，"
+            f"实际 {len(row.params)}: {row.atoms}")
+
+
+def parse_top(top_path) -> Topology:
+    """解析 top（含 #include 展开）为 Topology。
+
+    functype 边界：bonds/angles 仅 funct 1；dihedrals funct 9/1 → proper、
+    funct 4 → improper；其它一律 ValueError。未识别的段（pairs/constraints/
+    settles/exclusions 等）跳过并告警。
+    """
+    sections = _collect_sections(_expand_includes(Path(top_path)))
+
+    defaults = Defaults()
+    atomtype_rows: list[str] = []
+    mol_types: dict[str, MolType] = {}
+    molecules: list[tuple[str, int]] = []
+    current_mol: MolType | None = None
+    skipped: set[str] = set()
+
+    for name, rows in sections:
+        if name == "defaults":
+            defaults = _parse_defaults(rows)
+        elif name == "atomtypes":
+            atomtype_rows.extend(rows)
+        elif name == "moleculetype":
+            mol_name = rows[0].split()[0]
+            if mol_name in mol_types:
+                raise ValueError(f"[ moleculetype ] 重复定义: {mol_name}")
+            current_mol = MolType(name=mol_name)
+            mol_types[mol_name] = current_mol
+        elif name == "atoms":
+            if current_mol is None:
+                raise ValueError("[ atoms ] 出现在任何 [ moleculetype ] 之前")
+            current_mol.atoms.extend(_parse_atom_row(r) for r in rows)
+        elif name == "bonds":
+            if current_mol is None:
+                raise ValueError("[ bonds ] 出现在任何 [ moleculetype ] 之前")
+            for r in rows:
+                row = _parse_bonded_row(r, 2, name)
+                if row.funct != 1:
+                    raise ValueError(f"[ bonds ] 不支持的 functype {row.funct}: {r!r}")
+                _check_params(row, 2, name)
+                current_mol.bonds.append(row)
+        elif name == "angles":
+            if current_mol is None:
+                raise ValueError("[ angles ] 出现在任何 [ moleculetype ] 之前")
+            for r in rows:
+                row = _parse_bonded_row(r, 3, name)
+                if row.funct != 1:
+                    raise ValueError(f"[ angles ] 不支持的 functype {row.funct}: {r!r}")
+                _check_params(row, 2, name)
+                current_mol.angles.append(row)
+        elif name == "dihedrals":
+            if current_mol is None:
+                raise ValueError("[ dihedrals ] 出现在任何 [ moleculetype ] 之前")
+            for r in rows:
+                row = _parse_bonded_row(r, 4, name)
+                if row.funct in (1, 9):
+                    _check_params(row, 3, name)
+                    current_mol.dihedrals.append(row)
+                elif row.funct == 4:
+                    _check_params(row, 3, name)
+                    current_mol.impropers.append(row)
+                else:
+                    raise ValueError(
+                        f"[ dihedrals ] 不支持的 functype {row.funct}: {r!r}")
+        elif name == "molecules":
+            for r in rows:
+                t = r.split()
+                molecules.append((t[0], int(t[1])))
+        elif name == "system":
+            continue
+        else:
+            skipped.add(name)
+
+    for name in sorted(skipped):
+        warnings.warn(f"[ {name} ] 段未处理，已跳过"
+                      "（pairs/constraints 等由 LAMMPS 端 special_bonds/系综设置覆盖）")
+
+    if not molecules:
+        raise ValueError("top 缺少 [ molecules ] 段")
+    for mol_name, _count in molecules:
+        if mol_name not in mol_types:
+            raise ValueError(f"[ molecules ] 引用了未定义的 moleculetype: {mol_name}")
+
+    atom_types = _parse_atomtypes(atomtype_rows, defaults.comb_rule) if atomtype_rows else []
+    known = {t.name for t in atom_types}
+    for mol in mol_types.values():
+        for a in mol.atoms:
+            if a.type_name not in known:
+                raise ValueError(
+                    f"[ atoms ] 引用了未定义的 atomtype: {a.type_name}"
+                    f"（moleculetype {mol.name}）")
+
+    return Topology(defaults=defaults, atom_types=atom_types,
+                    mol_types=mol_types, molecules=molecules)

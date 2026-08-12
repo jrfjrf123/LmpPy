@@ -185,3 +185,133 @@ class TestTopInfrastructure:
     def test_atomtypes_bad_column_count_raises(self):
         with pytest.raises(ValueError, match="atomtypes"):
             g2l._parse_atomtypes(["c3 12.011 0.0"], comb_rule=2)
+
+
+MINI_TOP = """\
+[ defaults ]
+1 2 yes 0.5 0.8333
+
+[ atomtypes ]
+c3   6   12.011   0.0   A   3.400000E-01   4.184000E-01
+hc   1   1.008    0.0   A   2.600000E-01   8.368000E-02
+
+[ moleculetype ]
+mol   3
+
+[ atoms ]
+1  c3  1  MOL  C1  1  0.10000000  12.011
+2  c3  1  MOL  C2  2  -0.20000000  12.011
+3  c3  1  MOL  C3  3  0.05000000  12.011
+4  hc  1  MOL  H4  4  0.05000000  1.008
+
+[ bonds ]
+1  2  1  0.150000  83680.0
+2  3  1  0.150000  83680.0
+3  4  1  0.109000  83680.0
+
+[ angles ]
+1  2  3  1  109.500  836.8
+2  3  4  1  109.500  836.8
+
+[ dihedrals ]
+1  2  3  4  9  180.0  4.184  -3
+1  2  3  4  9  0.0  2.092  1
+1  2  3  4  4  0.0  8.368  2
+
+[ moleculetype ]
+single  3
+
+[ atoms ]
+1  hc  1  SOL  H1  1  0.00000000  1.008
+
+[ molecules ]
+mol     2
+single  2
+"""
+
+MINI_GRO = """\
+mini
+10
+    1MOL     C1    1   1.000   1.000   1.000
+    1MOL     C2    2   1.150   1.000   1.000
+    1MOL     C3    3   1.300   1.000   1.000
+    1MOL     H4    4   1.400   1.000   1.000
+    2MOL     C1    5   2.000   2.000   2.000
+    2MOL     C2    6   2.150   2.000   2.000
+    2MOL     C3    7   2.300   2.000   2.000
+    2MOL     H4    8   2.400   2.000   2.000
+    3SOL     H1    9   3.000   3.000   3.000
+    4SOL     H1   10   3.500   3.500   3.500
+   5.00000   5.00000   5.00000
+"""
+
+
+def _write_mini(tmp_path: Path):
+    top = tmp_path / "mini.top"
+    gro = tmp_path / "mini.gro"
+    top.write_text(MINI_TOP, encoding="utf-8")
+    gro.write_text(MINI_GRO, encoding="utf-8")
+    return top, gro
+
+
+class TestParseTop:
+    def test_mini_system(self, tmp_path):
+        top, _ = _write_mini(tmp_path)
+        topo = g2l.parse_top(top)
+        assert topo.defaults.comb_rule == 2
+        assert [t.name for t in topo.atom_types] == ["c3", "hc"]
+        assert topo.molecules == [("mol", 2), ("single", 2)]
+        mol = topo.mol_types["mol"]
+        assert len(mol.atoms) == 4
+        assert mol.atoms[1].charge == pytest.approx(-0.2)
+        assert len(mol.bonds) == 3
+        assert len(mol.angles) == 2
+        # funct 9 两行 → propers（多 term 同四元组保留），funct 4 → improper
+        assert len(mol.dihedrals) == 2
+        assert len(mol.impropers) == 1
+        assert mol.dihedrals[0].params == ("180.0", "4.184", "-3")
+        assert len(topo.mol_types["single"].atoms) == 1
+
+    def test_atoms_7col_no_mass(self, tmp_path):
+        text = MINI_TOP.replace("1  hc  1  SOL  H1  1  0.00000000  1.008",
+                                "1  hc  1  SOL  H1  1  0.00000000")
+        top = tmp_path / "t.top"
+        top.write_text(text, encoding="utf-8")
+        topo = g2l.parse_top(top)
+        assert topo.mol_types["single"].atoms[0].mass is None
+        assert topo.mol_types["mol"].atoms[0].mass == pytest.approx(12.011)
+
+    def test_bond_funct_unsupported_raises(self, tmp_path):
+        top = tmp_path / "t.top"
+        top.write_text(MINI_TOP.replace("1  2  1  0.150000  83680.0",
+                                        "1  2  2  0.150000  83680.0"),
+                       encoding="utf-8")
+        with pytest.raises(ValueError, match="functype"):
+            g2l.parse_top(top)
+
+    def test_dihedral_funct_3_raises(self, tmp_path):
+        top = tmp_path / "t.top"
+        top.write_text(MINI_TOP.replace("1  2  3  4  9  180.0  4.184  -3",
+                                        "1  2  3  4  3  0.0  0.0  0.0  0.0  0.0  0.0"),
+                       encoding="utf-8")
+        with pytest.raises(ValueError, match="functype"):
+            g2l.parse_top(top)
+
+    def test_undefined_moleculetype_raises(self, tmp_path):
+        top = tmp_path / "t.top"
+        top.write_text(MINI_TOP.replace("single  2", "ghost  2"), encoding="utf-8")
+        with pytest.raises(ValueError, match="ghost"):
+            g2l.parse_top(top)
+
+    def test_undefined_atomtype_raises(self, tmp_path):
+        top = tmp_path / "t.top"
+        top.write_text(MINI_TOP.replace("1  c3  1  MOL  C1", "1  xx  1  MOL  C1"),
+                       encoding="utf-8")
+        with pytest.raises(ValueError, match="xx"):
+            g2l.parse_top(top)
+
+    def test_missing_molecules_section_raises(self, tmp_path):
+        top = tmp_path / "t.top"
+        top.write_text(MINI_TOP.split("[ molecules ]")[0], encoding="utf-8")
+        with pytest.raises(ValueError, match="molecules"):
+            g2l.parse_top(top)
