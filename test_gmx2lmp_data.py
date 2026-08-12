@@ -112,3 +112,72 @@ class TestParseGro:
         )
         with pytest.raises(ValueError, match="盒行列数异常"):
             g2l.parse_gro(gro)
+
+
+class TestTopInfrastructure:
+    def test_expand_includes_recursive(self, tmp_path):
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "inner.itp").write_text("[ atoms ]\n1 c3 1 MOL C1 1 0.0\n", encoding="utf-8")
+        (tmp_path / "outer.itp").write_text(
+            '#include "sub/inner.itp"\n', encoding="utf-8")
+        top = tmp_path / "s.top"
+        top.write_text('[ defaults ]\n1 2 yes 0.5 0.8333\n#include "outer.itp"\n',
+                       encoding="utf-8")
+        lines = g2l._expand_includes(top)
+        assert any("[ atoms ]" in l for l in lines)
+        assert any(l.startswith("1 c3") for l in lines)
+
+    def test_expand_includes_missing_raises(self, tmp_path):
+        top = tmp_path / "s.top"
+        top.write_text('#include "nope.itp"\n', encoding="utf-8")
+        with pytest.raises(FileNotFoundError, match="nope.itp"):
+            g2l._expand_includes(top)
+
+    def test_collect_sections_header_inline_comment(self):
+        """sobtop 风格节头行内注释 `[ dihedrals ] ; propers` 正常识别。"""
+        lines = [
+            "[ bonds ]",
+            "1 2 1 0.15 83680.0  ; C1-C2 注释",
+            "",
+            "[ dihedrals ] ; propers",
+            "1 2 3 4 9 0.0 2.0 3",
+        ]
+        sections = g2l._collect_sections(lines)
+        assert [name for name, _ in sections] == ["bonds", "dihedrals"]
+        assert sections[0][1] == ["1 2 1 0.15 83680.0"]
+        assert sections[1][1] == ["1 2 3 4 9 0.0 2.0 3"]
+
+    def test_parse_defaults(self):
+        d = g2l._parse_defaults(["1 2 yes 0.5 0.8333"])
+        assert d.comb_rule == 2
+        assert d.fudge_lj == 0.5
+        assert d.fudge_qq == pytest.approx(0.8333)
+
+    def test_atomtypes_7col_with_atnum(self):
+        types = g2l._parse_atomtypes(
+            ["c3 6 12.010736 0.000000 A 3.397710E-01 4.510352E-01"], comb_rule=2)
+        assert types[0].name == "c3"
+        assert types[0].mass == pytest.approx(12.010736)
+        assert types[0].sigma_nm == pytest.approx(0.3397710)
+        assert types[0].epsilon_kj == pytest.approx(0.4510352)
+
+    def test_atomtypes_6col_without_atnum(self):
+        types = g2l._parse_atomtypes(
+            ["hc 1.007941 0.000000 A 2.600177E-01 8.702720E-02"], comb_rule=2)
+        assert types[0].name == "hc"
+        assert types[0].mass == pytest.approx(1.007941)
+
+    def test_atomtypes_comb_rule_1_c6_c12(self):
+        """comb-rule 1：σ=(C12/C6)^(1/6)，ε=C6²/(4·C12)。
+
+        构造值：c6=6.4e-05、c12=4.096e-09 → σ=0.2 nm，ε=0.25 kJ/mol。
+        """
+        types = g2l._parse_atomtypes(
+            ["c3 6 12.011 0.0 A 6.4e-05 4.096e-09"], comb_rule=1)
+        assert types[0].sigma_nm == pytest.approx(0.2)
+        assert types[0].epsilon_kj == pytest.approx(0.25)
+
+    def test_atomtypes_bad_column_count_raises(self):
+        with pytest.raises(ValueError, match="atomtypes"):
+            g2l._parse_atomtypes(["c3 12.011 0.0"], comb_rule=2)

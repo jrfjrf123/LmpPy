@@ -76,3 +76,99 @@ def parse_gro(gro_path: Path | str) -> tuple[list[tuple[float, float, float]], l
     else:
         raise ValueError(f"gro 盒行列数异常（需 3 或 9 列）: {lines[2 + n]!r}")
     return coords, box
+
+
+_INCLUDE_RE = re.compile(r'^\s*#include\s+["<]([^">]+)[">]')
+_SECTION_RE = re.compile(r"^\s*\[\s*([A-Za-z_]+)\s*\]")
+
+
+def _expand_includes(path: Path | str) -> list[str]:
+    """递归展开 #include（相对包含文件所在目录解析），返回合并行列表。"""
+    path = Path(path).resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"include 文件不存在: {path}")
+    lines: list[str] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        m = _INCLUDE_RE.match(raw)
+        if m:
+            lines.extend(_expand_includes(path.parent / m.group(1)))
+        else:
+            lines.append(raw)
+    return lines
+
+
+def _collect_sections(lines: list[str]) -> list[tuple[str, list[str]]]:
+    """按出现顺序收集 `[ section ]` 段的数据行（去 ; 注释、去空行）。
+
+    节头允许行内注释（`[ dihedrals ] ; propers`——正则只匹配到 `]`）。
+    """
+    sections: list[tuple[str, list[str]]] = []
+    current: tuple[str, list[str]] | None = None
+    for raw in lines:
+        m = _SECTION_RE.match(raw)
+        if m:
+            current = (m.group(1).lower(), [])
+            sections.append(current)
+            continue
+        if current is None:
+            continue
+        stripped = raw.split(";", 1)[0].strip()
+        if stripped:
+            current[1].append(stripped)
+    return sections
+
+
+@dataclass
+class Defaults:
+    nbfunc: int = 1
+    comb_rule: int = 2
+    fudge_lj: float = 1.0
+    fudge_qq: float = 1.0
+
+
+def _parse_defaults(rows: list[str]) -> Defaults:
+    t = rows[0].split()
+    if len(t) < 5:
+        raise ValueError(f"[ defaults ] 行格式不完整（需 5 列）: {rows[0]!r}")
+    return Defaults(nbfunc=int(t[0]), comb_rule=int(t[1]),
+                    fudge_lj=float(t[3]), fudge_qq=float(t[4]))
+
+
+@dataclass
+class AtomType:
+    name: str
+    mass: float        # g/mol
+    sigma_nm: float
+    epsilon_kj: float  # kJ/mol
+
+
+def _parse_atomtypes(rows: list[str], comb_rule: int) -> list[AtomType]:
+    """解析 [ atomtypes ]；顺序即 LAMMPS 类型号。
+
+    兼容 7 列（name at.num mass charge ptype p1 p2）与 6 列（无 at.num 列）。
+    comb-rule 2：p1/p2 = σ(nm)/ε(kJ/mol)；comb-rule 1：p1/p2 = C6/C12，
+    换算 σ=(C12/C6)^(1/6)、ε=C6²/(4·C12)（C6 或 C12 ≤ 0 时 σ=ε=0）。
+    """
+    if comb_rule not in (1, 2):
+        raise ValueError(f"不支持的 comb-rule {comb_rule}（仅支持 1/2）")
+    types = []
+    for r in rows:
+        t = r.split()
+        if len(t) == 7:
+            name, mass, p1, p2 = t[0], float(t[2]), float(t[5]), float(t[6])
+        elif len(t) == 6:
+            name, mass, p1, p2 = t[0], float(t[1]), float(t[4]), float(t[5])
+        else:
+            raise ValueError(f"[ atomtypes ] 行列数异常（需 6 或 7 列）: {r!r}")
+        if comb_rule == 2:
+            sigma_nm, epsilon_kj = p1, p2
+        else:
+            c6, c12 = p1, p2
+            if c6 <= 0.0 or c12 <= 0.0:
+                sigma_nm, epsilon_kj = 0.0, 0.0
+            else:
+                sigma_nm = (c12 / c6) ** (1.0 / 6.0)
+                epsilon_kj = c6 * c6 / (4.0 * c12)
+        types.append(AtomType(name=name, mass=mass,
+                              sigma_nm=sigma_nm, epsilon_kj=epsilon_kj))
+    return types
