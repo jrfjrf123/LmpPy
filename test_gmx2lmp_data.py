@@ -315,3 +315,29 @@ class TestParseTop:
         top.write_text(MINI_TOP.split("[ molecules ]")[0], encoding="utf-8")
         with pytest.raises(ValueError, match="molecules"):
             g2l.parse_top(top)
+
+    def test_angle_funct_unsupported_raises(self, tmp_path):
+        top = tmp_path / "t.top"
+        top.write_text(MINI_TOP.replace("1  2  3  1  109.500  836.8",
+                                        "1  2  3  2  109.500  836.8"),
+                       encoding="utf-8")
+        with pytest.raises(ValueError, match="functype"):
+            g2l.parse_top(top)
+
+    def test_duplicate_moleculetype_raises(self, tmp_path):
+        top = tmp_path / "t.top"
+        # 把第二个 moleculetype 也改名为 mol，触发重复定义
+        top.write_text(MINI_TOP.replace("single  3", "mol  3"),
+                       encoding="utf-8")
+        with pytest.raises(ValueError, match="重复定义"):
+            g2l.parse_top(top)
+
+    def test_atoms_before_moleculetype_raises(self, tmp_path):
+        top = tmp_path / "t.top"
+        top.write_text(
+            "[ atoms ]\n"
+            "1  c3  1  MOL  C1  1  0.00000000  12.011\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="出现在任何"):
+            g2l.parse_top(top)

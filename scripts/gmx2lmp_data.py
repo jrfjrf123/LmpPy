@@ -240,6 +240,36 @@ def _check_params(row: BondedRow, need: int, section: str) -> None:
             f"实际 {len(row.params)}: {row.atoms}")
 
 
+def _ensure_mol(current_mol: MolType | None, section: str) -> MolType:
+    """检查 bonded/atoms 段是否出现在 [ moleculetype ] 之前。"""
+    if current_mol is None:
+        raise ValueError(f"[ {section} ] 出现在任何 [ moleculetype ] 之前")
+    return current_mol
+
+
+def _add_bonded(mol, rows, n_atoms, section, allowed_funct, min_params, target_list):
+    """统一解析 bonds/angles/dihedrals 行。
+
+    target_list 为列表时，所有 funct 追加到同一列表；为 dict 时按 funct 分发。
+    min_params 可为统一整数或 dict[int, int]。
+    """
+    for r in rows:
+        row = _parse_bonded_row(r, n_atoms, section)
+        if isinstance(target_list, dict):
+            if row.funct not in target_list:
+                raise ValueError(
+                    f"[ {section} ] 不支持的 functype {row.funct}: {r!r}")
+            targets = target_list[row.funct]
+        else:
+            if row.funct not in allowed_funct:
+                raise ValueError(
+                    f"[ {section} ] 不支持的 functype {row.funct}: {r!r}")
+            targets = target_list
+        need = min_params[row.funct] if isinstance(min_params, dict) else min_params
+        _check_params(row, need, section)
+        targets.append(row)
+
+
 def parse_top(top_path) -> Topology:
     """解析 top（含 #include 展开）为 Topology。
 
@@ -254,7 +284,7 @@ def parse_top(top_path) -> Topology:
     mol_types: dict[str, MolType] = {}
     molecules: list[tuple[str, int]] = []
     current_mol: MolType | None = None
-    skipped: set[str] = set()
+    skipped_sections: set[str] = set()
 
     for name, rows in sections:
         if name == "defaults":
@@ -268,51 +298,34 @@ def parse_top(top_path) -> Topology:
             current_mol = MolType(name=mol_name)
             mol_types[mol_name] = current_mol
         elif name == "atoms":
-            if current_mol is None:
-                raise ValueError("[ atoms ] 出现在任何 [ moleculetype ] 之前")
-            current_mol.atoms.extend(_parse_atom_row(r) for r in rows)
+            mol = _ensure_mol(current_mol, name)
+            mol.atoms.extend(_parse_atom_row(r) for r in rows)
         elif name == "bonds":
-            if current_mol is None:
-                raise ValueError("[ bonds ] 出现在任何 [ moleculetype ] 之前")
-            for r in rows:
-                row = _parse_bonded_row(r, 2, name)
-                if row.funct != 1:
-                    raise ValueError(f"[ bonds ] 不支持的 functype {row.funct}: {r!r}")
-                _check_params(row, 2, name)
-                current_mol.bonds.append(row)
+            mol = _ensure_mol(current_mol, name)
+            _add_bonded(mol, rows, 2, name, {1}, 2, mol.bonds)
         elif name == "angles":
-            if current_mol is None:
-                raise ValueError("[ angles ] 出现在任何 [ moleculetype ] 之前")
-            for r in rows:
-                row = _parse_bonded_row(r, 3, name)
-                if row.funct != 1:
-                    raise ValueError(f"[ angles ] 不支持的 functype {row.funct}: {r!r}")
-                _check_params(row, 2, name)
-                current_mol.angles.append(row)
+            mol = _ensure_mol(current_mol, name)
+            _add_bonded(mol, rows, 3, name, {1}, 2, mol.angles)
         elif name == "dihedrals":
-            if current_mol is None:
-                raise ValueError("[ dihedrals ] 出现在任何 [ moleculetype ] 之前")
-            for r in rows:
-                row = _parse_bonded_row(r, 4, name)
-                if row.funct in (1, 9):
-                    _check_params(row, 3, name)
-                    current_mol.dihedrals.append(row)
-                elif row.funct == 4:
-                    _check_params(row, 3, name)
-                    current_mol.impropers.append(row)
-                else:
-                    raise ValueError(
-                        f"[ dihedrals ] 不支持的 functype {row.funct}: {r!r}")
+            mol = _ensure_mol(current_mol, name)
+            _add_bonded(
+                mol, rows, 4, name,
+                allowed_funct={1, 9, 4},
+                min_params={1: 3, 9: 3, 4: 3},
+                target_list={1: mol.dihedrals, 9: mol.dihedrals, 4: mol.impropers},
+            )
         elif name == "molecules":
             for r in rows:
                 t = r.split()
+                if len(t) < 2:
+                    raise ValueError(f"[ molecules ] 行格式不完整: {r!r}")
                 molecules.append((t[0], int(t[1])))
         elif name == "system":
             continue
         else:
-            skipped.add(name)
+            skipped_sections.add(name)
 
-    for name in sorted(skipped):
+    for name in sorted(skipped_sections):
         warnings.warn(f"[ {name} ] 段未处理，已跳过"
                       "（pairs/constraints 等由 LAMMPS 端 special_bonds/系综设置覆盖）")
 
