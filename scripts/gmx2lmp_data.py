@@ -18,9 +18,9 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-import warnings  # noqa: F401
+import warnings
 from dataclasses import dataclass
-from dataclasses import field  # noqa: F401
+from dataclasses import field
 from pathlib import Path
 
 KCAL_PER_KJ = 4.184  # kJ/mol → kcal/mol
@@ -566,23 +566,29 @@ def main(argv=None) -> int:
         topo = parse_top(args.top)
         coords, box = parse_gro(args.gro)
         system = build_system(topo, coords, box)
+
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        write_lmp_data(system, topo.atom_types, topo.defaults, out_path,
+                       title=f"converted from {Path(args.top).name} + "
+                             f"{Path(args.gro).name} (gmx2lmp_data)")
+
+        if args.type_order:
+            type_order_path = Path(args.type_order)
+            type_order_path.parent.mkdir(parents=True, exist_ok=True)
+            order = ",".join(f"{i + 1}={t.name}" for i, t in enumerate(topo.atom_types))
+            type_order_path.write_text(
+                f"{Path(args.top).stem}: {order}\n", encoding="utf-8")
+
     except (ValueError, FileNotFoundError) as e:
         print(f"错误: {e}", file=sys.stderr)
         return 2
-
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    write_lmp_data(system, topo.atom_types, topo.defaults, out_path,
-                   title=f"converted from {Path(args.top).name} + "
-                         f"{Path(args.gro).name} (gmx2lmp_data)")
+    except OSError as e:
+        print(f"写入失败: {e}", file=sys.stderr)
+        return 3
 
     if all(a[2] == 0.0 for a in system.atoms):
         print("警告: 所有原子电荷为 0，请检查 top/itp 电荷设置", file=sys.stderr)
-
-    if args.type_order:
-        order = ",".join(f"{i + 1}={t.name}" for i, t in enumerate(topo.atom_types))
-        Path(args.type_order).write_text(
-            f"{Path(args.top).stem}: {order}\n", encoding="utf-8")
 
     print(f"转换完成: {out_path}")
     print(f"  原子 {len(system.atoms)}，键 {len(system.bonds)}，"

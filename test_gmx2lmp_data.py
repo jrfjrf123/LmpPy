@@ -549,6 +549,15 @@ class TestCli:
         assert out.exists()
         assert "10 atoms" in out.read_text(encoding="utf-8")
 
+    def test_main_direct_call(self, tmp_path, capsys):
+        top, gro = _write_mini(tmp_path)
+        out = tmp_path / "out.data"
+        rc = g2l.main(["--top", str(top), "--gro", str(gro), "-o", str(out)])
+        assert rc == 0
+        assert out.exists()
+        captured = capsys.readouterr()
+        assert "转换完成" in captured.out
+
     def test_type_order_file(self, tmp_path):
         top, gro = _write_mini(tmp_path)
         order = tmp_path / "type_order.txt"
