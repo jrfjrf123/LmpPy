@@ -405,3 +405,61 @@ class TestBuildSystem:
         coords, box = g2l.parse_gro(gro)
         with pytest.warns(UserWarning, match="质量"):
             g2l.build_system(topo, coords, box)
+
+
+def _build_mini_system(tmp_path):
+    top, gro = _write_mini(tmp_path)
+    topo = g2l.parse_top(top)
+    coords, box = g2l.parse_gro(gro)
+    return topo, g2l.build_system(topo, coords, box)
+
+
+class TestWriteNonbonded:
+    def test_header_counts_and_box(self, tmp_path):
+        topo, system = _build_mini_system(tmp_path)
+        out = tmp_path / "out.data"
+        g2l.write_lmp_data(system, topo.atom_types, topo.defaults, out)
+        text = out.read_text(encoding="utf-8")
+        for line in ("10 atoms", "6 bonds", "4 angles", "4 dihedrals",
+                     "2 impropers", "2 atom types", "2 bond types",
+                     "1 angle types", "2 dihedral types", "1 improper types",
+                     "0.000000 50.000000 xlo xhi"):
+            assert line in text, line
+
+    def test_header_comment_block(self, tmp_path):
+        topo, system = _build_mini_system(tmp_path)
+        out = tmp_path / "out.data"
+        g2l.write_lmp_data(system, topo.atom_types, topo.defaults, out)
+        text = out.read_text(encoding="utf-8")
+        assert "# pair_modify mix geometric" in text
+        assert "# special_bonds lj 0.0 0.0 0.5 coul 0.0 0.0 0.8333" in text
+        assert "# improper_style cvff" in text
+
+    def test_masses_and_pair_coeffs(self, tmp_path):
+        topo, system = _build_mini_system(tmp_path)
+        out = tmp_path / "out.data"
+        g2l.write_lmp_data(system, topo.atom_types, topo.defaults, out)
+        lines = out.read_text(encoding="utf-8").splitlines()
+        mi = lines.index("Masses")
+        assert lines[mi + 1] == ""  # 节头后必须空行（read_data 会吃掉下一行）
+        assert lines[mi + 2].split() == ["1", "12.011"]
+        assert lines[mi + 3].split() == ["2", "1.008"]
+        pi = next(i for i, l in enumerate(lines) if l.startswith("Pair Coeffs"))
+        # c3: ε=0.4184 kJ/mol → 0.1 kcal/mol；σ=0.34 nm → 3.4 Å
+        assert lines[pi + 2].split() == ["1", "1.000000e-01", "3.400000"]
+        # hc: ε=0.08368 kJ/mol → 0.02 kcal/mol；σ=0.26 nm → 2.6 Å
+        assert lines[pi + 3].split() == ["2", "2.000000e-02", "2.600000"]
+
+    def test_atoms_section_full_style(self, tmp_path):
+        topo, system = _build_mini_system(tmp_path)
+        out = tmp_path / "out.data"
+        g2l.write_lmp_data(system, topo.atom_types, topo.defaults, out)
+        lines = out.read_text(encoding="utf-8").splitlines()
+        ai = next(i for i, l in enumerate(lines) if l.startswith("Atoms"))
+        rows = [l.split() for l in lines[ai + 2:ai + 12]]
+        assert len(rows) == 10
+        # id mol type q x y z
+        assert rows[0][0] == "1" and rows[0][1] == "1" and rows[0][2] == "1"
+        assert float(rows[0][3]) == pytest.approx(0.1)
+        assert float(rows[0][4]) == pytest.approx(10.0)
+        assert rows[8][1] == "3" and rows[9][1] == "4"  # single 分子的 mol_id

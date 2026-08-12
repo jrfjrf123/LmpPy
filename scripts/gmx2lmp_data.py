@@ -444,3 +444,72 @@ def build_system(topo: Topology, coords: list, box: list[float]) -> System:
         warnings.warn(f"{mass_mismatch} 个原子的 atoms 行质量与 atomtype 质量不一致，"
                       "Masses 段按 atomtype 质量写出")
     return system
+
+
+def _phase_sign(phase: float, pn: int, label: str) -> int:
+    """GAFF 相位 0/180° → LAMMPS 符号；pn<0（cos 翻转）再翻一次。"""
+    sign = -1 if phase == 180.0 else 1
+    if phase not in (0.0, 180.0):
+        warnings.warn(f"{label} 相位 {phase}° 不在 0/180°，按 0°（sign=+1）处理，"
+                      "需人工核对")
+    if pn < 0:
+        sign = -sign
+    return sign
+
+
+def write_lmp_data(system: System, atom_types: list, defaults: Defaults,
+                   out_path, title: str = "GROMACS → LAMMPS data (gmx2lmp_data)") -> None:
+    """写出 LAMMPS data（real 单位，atom_style full）。
+
+    换算（与 pre_data_gen/scripts/convert_to_lmp.py 已验证公式一致）：
+      bond  K = k/(2·4.184·100) kcal/mol/Å²，r0 Å      → harmonic
+      angle K = k/(2·4.184) kcal/mol/rad²，θ0 度        → harmonic
+      dihedral K = kd/4.184，phase→sign，n=|pn|         → harmonic
+      improper 同 dihedral 形式                          → cvff (K d n)
+      pair  ε = ε_kJ/4.184 kcal/mol，σ = σ_nm·10 Å      → lj/cut
+    """
+    mix = {1: "arithmetic", 2: "geometric"}[defaults.comb_rule]
+    L: list[str] = [
+        title,
+        "# pair_style lj/cut",
+        f"# pair_modify mix {mix}",
+        "# bond_style harmonic",
+        "# angle_style harmonic",
+        "# dihedral_style harmonic",
+        "# improper_style cvff",
+        "# atom_style full",
+        f"# special_bonds lj 0.0 0.0 {defaults.fudge_lj} coul 0.0 0.0 {defaults.fudge_qq}",
+        "",
+        f"{len(system.atoms)} atoms",
+        f"{len(system.bonds)} bonds",
+        f"{len(system.angles)} angles",
+        f"{len(system.dihedrals)} dihedrals",
+        f"{len(system.impropers)} impropers",
+        "",
+        f"{len(atom_types)} atom types",
+        f"{len(system.bond_coeffs)} bond types",
+        f"{len(system.angle_coeffs)} angle types",
+        f"{len(system.dihedral_coeffs)} dihedral types",
+        f"{len(system.improper_coeffs)} improper types",
+        "",
+        f"0.000000 {system.box[0]:.6f} xlo xhi",
+        f"0.000000 {system.box[1]:.6f} ylo yhi",
+        f"0.000000 {system.box[2]:.6f} zlo zhi",
+        "",
+        "Masses",
+        "",
+    ]
+    for i, t in enumerate(atom_types, 1):
+        L.append(f"{i} {t.mass:g}")
+
+    L += ["", "Pair Coeffs # lj/cut", ""]
+    for i, t in enumerate(atom_types, 1):
+        L.append(f"{i} {t.epsilon_kj / KCAL_PER_KJ:.6e} {t.sigma_nm * 10.0:.6f}")
+
+    # --- bonded Coeffs（Task 6 补全） ---
+    L += ["", "Atoms # full", ""]
+    for i, (mol_id, tid, q, x, y, z) in enumerate(system.atoms, 1):
+        L.append(f"{i} {mol_id} {tid} {q:.8f} {x:.6f} {y:.6f} {z:.6f}")
+
+    # --- 拓扑段（Task 6 补全） ---
+    Path(out_path).write_text("\n".join(L) + "\n", encoding="utf-8")
