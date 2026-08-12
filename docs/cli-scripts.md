@@ -25,6 +25,7 @@
 | [test_smoke_run.py](#12-test_smoke_runpy) | 冒烟测试独立运行 |
 | [validate_config.py](#13-validate_configpy) | 配置验证 |
 | [yaml2csv_mapping.py](#14-yaml2csv_mappingpy) | YAML 到 CSV 映射转换 |
+| [gmx2lmp_data.py](#15-gmx2lmp_datapy) | GROMACS top+gro 转 LAMMPS data |
 
 ---
 
@@ -640,6 +641,28 @@ CUSTOM_BEAD_TYPE_MAP = {
     "Bead8": 2,
 }
 ```
+
+---
+
+## 15. gmx2lmp_data.py
+
+GROMACS top（可含 `#include` itp）+ gro → LAMMPS data 文件（GAFF 力场、real 单位、`atom_style full`）。纯 Python 标准库实现，无第三方依赖。
+
+```bash
+python LmpPy/scripts/gmx2lmp_data.py --top system.top --gro conf.gro -o out.data
+python LmpPy/scripts/gmx2lmp_data.py --top system.top --gro conf.gro -o out.data \
+    --type-order type_order.txt   # 可选：输出 类型号=GAFF类型名 映射
+```
+
+**支持范围：**
+
+- 递归 `#include`（相对包含文件所在目录）；`[ molecules ]` 多分子计数展开
+- `[ atomtypes ]` 6 列 / 7 列（含 at.num）两种格式；comb-rule 1（C6/C12 自动换算 σ/ε）与 comb-rule 2
+- bonds/angles funct 1、dihedrals funct 9/1（proper，多 term 保留叠加）、funct 4（improper → cvff）
+- 正交盒；全零盒按坐标范围 + 1 nm 边距兜底（最小 3 nm）
+- 不支持的 functype（2/3/5/10 等）报错退出；`[ pairs ]`/`[ constraints ]` 等段跳过并告警（1-4 缩放由输出文件头注释建议的 `special_bonds` 覆盖）
+
+输出文件头注释列出了所需的 `pair_style`/`bond_style` 等 LAMMPS 设置与 `special_bonds` 建议值，直接照抄到输入脚本即可。
 
 ---
 

@@ -10,6 +10,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
 import gmx2lmp_data as g2l
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 
 class TestParseGro:
     def test_basic_orthogonal_box(self, tmp_path):
@@ -584,3 +586,88 @@ class TestCli:
                       "-o", str(tmp_path / "out.data"))
         assert r.returncode == 0, r.stderr
         assert "电荷为 0" in r.stderr
+
+
+
+AA_CG = PROJECT_ROOT / "data/aa_cg_pipeline/acrylamide_acrylic_acid"
+EPR_GMX = PROJECT_ROOT / "data/aa_cg_pipeline/epr/gmx"
+
+_LMP_SECTIONS = ("Masses", "Pair Coeffs", "Bond Coeffs", "Angle Coeffs",
+                 "Dihedral Coeffs", "Improper Coeffs", "Atoms", "Bonds",
+                 "Angles", "Dihedrals", "Impropers")
+_LMP_COUNT_KEYS = ("atoms", "bonds", "angles", "dihedrals", "impropers",
+                   "atom types", "bond types", "angle types",
+                   "dihedral types", "improper types")
+
+
+def _read_lmp_data(path):
+    """极简 LAMMPS data 解析：返回 {"counts": dict, "sections": {段名: [行]}}。"""
+    counts: dict[str, int] = {}
+    sections: dict[str, list[str]] = {}
+    current = None
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        s = raw.split("#")[0].strip()
+        if s in _LMP_SECTIONS:
+            current = s
+            sections[current] = []
+            continue
+        m = re.match(r"^(\d+)\s+(\w[\w ]*?)$", s)
+        if current is None and m and m.group(2) in _LMP_COUNT_KEYS:
+            counts[m.group(2)] = int(m.group(1))
+        elif current and s:
+            sections[current].append(s)
+    return {"counts": counts, "sections": sections}
+
+
+@pytest.mark.skipif(not (AA_CG / "lmp_data/chain.data").exists(),
+                    reason="mdfmt 路线参考数据不在本机")
+def test_chain_matches_mdfmt_route(tmp_path):
+    """与 convert_to_lmp.py（mdfmt 路线 + 后处理）的产出逐项对比。"""
+    out = tmp_path / "chain.data"
+    rc = g2l.main(["--top", str(AA_CG / "sobtop/chain/chain.top"),
+                   "--gro", str(AA_CG / "sobtop/chain/chain.gro"),
+                   "-o", str(out)])
+    assert rc == 0
+    ref = _read_lmp_data(AA_CG / "lmp_data/chain.data")
+    new = _read_lmp_data(out)
+
+    for key in _LMP_COUNT_KEYS:
+        assert new["counts"][key] == ref["counts"][key], key
+
+    for sec in ("Masses", "Pair Coeffs", "Bond Coeffs", "Angle Coeffs",
+                "Dihedral Coeffs", "Improper Coeffs"):
+        ref_rows = [[float(x) for x in r.split()] for r in ref["sections"][sec]]
+        new_rows = [[float(x) for x in r.split()] for r in new["sections"][sec]]
+        assert len(new_rows) == len(ref_rows), sec
+        for nrow, rrow in zip(new_rows, ref_rows):
+            assert nrow == pytest.approx(rrow, rel=1e-3, abs=1e-6), sec
+
+    for sec in ("Bonds", "Angles", "Dihedrals", "Impropers"):
+        assert sorted(r.split() for r in new["sections"][sec]) == \
+               sorted(r.split() for r in ref["sections"][sec]), sec
+
+    q_ref = sum(float(r.split()[3]) for r in ref["sections"]["Atoms"])
+    q_new = sum(float(r.split()[3]) for r in new["sections"]["Atoms"])
+    assert q_new == pytest.approx(q_ref, abs=1e-4)
+
+
+@pytest.mark.skipif(not (EPR_GMX / "system.gro").exists(),
+                    reason="EPR 数据不在本机")
+def test_epr_system_end_to_end(tmp_path):
+    """EPR 357 链体系：多分子大规模展开 + 跨目录 include（../sobtop/...）。"""
+    out = tmp_path / "epr.data"
+    rc = g2l.main(["--top", str(EPR_GMX / "system.top"),
+                   "--gro", str(EPR_GMX / "system.gro"),
+                   "-o", str(out)])
+    assert rc == 0
+    data = _read_lmp_data(out)
+    assert data["counts"]["atoms"] == 49980
+    assert data["counts"]["atom types"] == 2
+    # 实测每链计数：bonds=139, angles=276, dihedrals=405
+    assert data["counts"]["bonds"] == 139 * 357
+    assert data["counts"]["angles"] == 276 * 357
+    assert data["counts"]["dihedrals"] == 405 * 357
+    mol_ids = {int(r.split()[1]) for r in data["sections"]["Atoms"]}
+    assert len(mol_ids) == 357
+    text = out.read_text(encoding="utf-8")
+    assert "0.000000 103.557300 xlo xhi" in text
