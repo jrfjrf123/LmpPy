@@ -86,6 +86,19 @@ def parse_mapping_file(mapping_file, bead_type_offset=0, aa_id_offset=0, mol_id_
     return bead_list, current_bead_id, next_bead_type, next_aa_id, next_mol_id
 
 
+def load_custom_bead_type_map(path):
+    """从 YAML/JSON 文件加载自定义 bead 类型映射 {site_type_name: bead_type_id}。
+
+    YAML 是 JSON 超集，safe_load 同时兼容 .yaml / .json。
+    映射须覆盖 system.yaml 引用的所有 mapping 文件里的 site-types 名称，
+    否则缺失名称会走 parse_mapping_file 的自动编号（bead_type_map 非 None 时不回退）。
+    """
+    data = load_yaml(path)
+    if not isinstance(data, dict):
+        raise ValueError(f"自定义映射文件必须是键值映射: {path}")
+    return {str(k): int(v) for k, v in data.items()}
+
+
 def yaml_to_csv(system_yaml_file, output_csv='AtomId_BeadId_compare_list.csv', custom_bead_type_map=None, output_flag=True):
     """
     Convert YAML mapping files to CSV format.
@@ -193,7 +206,10 @@ if __name__ == "__main__":
   # 基本用法 (自动生成 bead type)
   python -m LmpPy.scripts.yaml2csv_mapping -s system.yaml -o mapping.csv
 
-  # 使用硬编码的自定义 bead type 映射
+  # 从 YAML/JSON 文件加载自定义 bead type 映射（推荐）
+  python -m LmpPy.scripts.yaml2csv_mapping -s system.yaml --custom-map bead_type_map.yaml
+
+  # 使用内置硬编码的自定义 bead type 映射（EPR，向后兼容）
   python -m LmpPy.scripts.yaml2csv_mapping -s system.yaml --custom
 """
     )
@@ -202,44 +218,42 @@ if __name__ == "__main__":
                         help='Path to system.yaml file')
     parser.add_argument('-o', '--output', default='AtomId_BeadId_compare_list.csv',
                         help='Output CSV filename (default: AtomId_BeadId_compare_list.csv)')
+    parser.add_argument('--custom-map', metavar='FILE',
+                        help='从 YAML/JSON 文件加载自定义 bead type 映射 '
+                             '{site_type_name: bead_type_id}')
     parser.add_argument('--custom', action='store_true',
-                        help='Use hardcoded custom bead type mapping')
+                        help='Use hardcoded custom bead type mapping (EPR)')
     parser.add_argument('-q', '--quiet', action='store_true',
                         help='Suppress detailed output')
 
     args = parser.parse_args()
 
     # ========================================
-    # 硬编码的自定义 bead type 映射
-    # 根据需要修改此字典
+    # 硬编码的自定义 bead type 映射（EPR，向后兼容兜底）
+    # 新增体系建议改用 --custom-map 文件输入，避免改脚本
     # ========================================
-    """
-    # PIP custom bead type mapping:
-    CUSTOM_BEAD_TYPE_MAP = {
-    "Bead1": 1,    # chain_bead
-    "Bead2": 2,    # chain_reactor_bead
-    "IP": 3,    # monomoer(IP)
-
-    }
-
-    """
-    # EPR custom bead type mapping:
-
     CUSTOM_BEAD_TYPE_MAP = {
     "Bead1": 1,    # chain E
     "Bead2": 2,    # chain P
     "Bead3": 1,    # chain reactor E
-    "Bead4": 2,    # chain reactor P 
+    "Bead4": 2,    # chain reactor P
     "Bead5": 3,    # E
     "Bead6": 4,    # P
     "Bead7": 1,    # chain head E
     "Bead8": 2     # chain head P
     }
-    
-    # Select bead type map
-    custom_bead_type_map = CUSTOM_BEAD_TYPE_MAP if args.custom else None
 
-    if not args.quiet and args.custom:
+    # 解析 bead type 映射：--custom-map 文件 > --custom 硬编码 > 自动编号(None)
+    if args.custom_map and args.custom:
+        print("警告: --custom-map 与 --custom 同时指定，优先使用 --custom-map")
+    if args.custom_map:
+        custom_bead_type_map = load_custom_bead_type_map(args.custom_map)
+    elif args.custom:
+        custom_bead_type_map = CUSTOM_BEAD_TYPE_MAP
+    else:
+        custom_bead_type_map = None
+
+    if not args.quiet and custom_bead_type_map is not None:
         print("Using custom bead type mapping:")
         for name, type_id in sorted(custom_bead_type_map.items(), key=lambda x: x[1]):
             print(f"  {name}: {type_id}")
