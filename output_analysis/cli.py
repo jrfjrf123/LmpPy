@@ -148,6 +148,23 @@ def cmd_reactivity_ratio(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_reactivity_ratio_aa(args: argparse.Namespace) -> None:
+    """AA bond/react 数据竞聚率统计分析。"""
+    from .reactivity_ratio import analyze_reactivity_ratio_aa
+
+    analyze_reactivity_ratio_aa(
+        aa_dirs=args.input_dirs or None,
+        output_dir=args.output_dir,
+        windows=args.windows,
+        pair_cutoff=args.pair_cutoff,
+        bond_react_check_step=args.bond_react_check_step,
+        blocks=args.blocks,
+        n_boot=args.n_boot,
+        seed=args.seed,
+        counts_out=args.counts_out,
+    )
+
+
 def main(argv: Optional[list] = None) -> None:
     """CLI 主入口。"""
     parser = argparse.ArgumentParser(
@@ -244,6 +261,29 @@ def main(argv: Optional[list] = None) -> None:
                       help="从已有计数表直接估计 (跳过轨迹扫描)")
     p_rr.add_argument("-o", "--output-dir", type=str, default=None, help="输出目录")
 
+    # ---- reactivity-ratio-aa (AA bond/react 数据) ----
+    p_rra = subparsers.add_parser(
+        "reactivity-ratio-aa",
+        help="竞聚率统计分析 (AA bond/react 数据: reaction_frames.npz + 轨迹)",
+    )
+    p_rra.add_argument(
+        "input_dirs", type=str, nargs="*",
+        help="AA 数据根目录列表 (自动 rglob reaction_frames.npz),"
+             "或直接传含 reaction_frames.npz 的目录",
+    )
+    p_rra.add_argument("--windows", type=int, default=20, help="转化率窗口数")
+    p_rra.add_argument("--pair-cutoff", type=float, default=10.0,
+                       help="候选对距离截断 (Å),需与模拟一致")
+    p_rra.add_argument("--bond-react-check-step", type=int, default=1,
+                       help="AA 数据 bond/react 检查间隔 (MD 步),"
+                            "需与 lammps_params.yaml 的 steps.bond_react_check 一致")
+    p_rra.add_argument("--blocks", type=int, default=20, help="block bootstrap 块数")
+    p_rra.add_argument("--n-boot", type=int, default=1000, help="bootstrap 重抽样次数")
+    p_rra.add_argument("--seed", type=int, default=0, help="随机种子")
+    p_rra.add_argument("--counts-out", type=str, default=None,
+                       help="per-frame 计数表输出路径 (设置后单独可复用)")
+    p_rra.add_argument("-o", "--output-dir", type=str, default=None, help="输出目录")
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -257,6 +297,7 @@ def main(argv: Optional[list] = None) -> None:
         "all": cmd_all,
         "rebuild": cmd_rebuild,
         "reactivity-ratio": cmd_reactivity_ratio,
+        "reactivity-ratio-aa": cmd_reactivity_ratio_aa,
     }
 
     handler = handlers.get(args.command)

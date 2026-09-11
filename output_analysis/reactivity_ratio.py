@@ -179,6 +179,146 @@ def collect_per_cycle_counts(
     return pd.DataFrame(all_rows)
 
 
+def collect_per_cycle_counts_aa(
+    aa_dirs: Sequence,
+    pair_cutoff: float = 10.0,
+    bond_react_check_step: int = 1,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """从 AA bond/react 模拟输出收集 per-frame 计数表。
+
+    数据源为 LmpPy bond/react 后处理的产物（如
+    data/LmpPy_original/*/multi_chunk_md/*/）：
+    - reaction_frames.npz: 反应帧,含 cg_bonds_before/after 与 cg_mapping_before,
+      每帧一个反应事件(新键类型对 -> 通道)
+    - cg_trajectory.lammpstrj: 事件驱动轨迹(每个事件前后各一帧)
+
+    **轨迹结构**：每个 md 编号是一条跨 chunk 的连续模拟
+    （chunk1/mdN -> chunk2/mdN -> ...），按 (md, chunk) 分组串联为
+    多条独立轨迹,输出带 traj 列（md 名）。切勿按 rglob 目录序交错拼接。
+
+    与 collect_per_cycle_counts 的区别: 无固定 cycle 网格,行 = 事件帧,
+    cycle 为轨迹内连续帧序号。
+
+    **反应前帧**：事件帧取轨迹中 ts - bond_react_check_step 帧（反应前构型,
+    单体未消耗、类型未变,与 reaction_frames.npz 的 cg_mapping_before 一致;
+    LmpPy 写出事件驱动轨迹时,反应前帧即按此间隔标注 timestep），
+    n5/n6 与候选对暴露 E 均为事件发生时刻的浓度/暴露。
+
+    参数
+    ----
+    aa_dirs : 根目录列表(各含 chunk*/md*/reaction_frames.npz),
+        或直接传 md 目录(含 reaction_frames.npz 的目录)
+    pair_cutoff : 候选对距离截断 (Å)
+    bond_react_check_step : 该数据 bond/react 的检查间隔 (MD 步),
+        需与 lammps_params.yaml 的 steps.bond_react_check 一致
+    verbose : 打印进度
+
+    返回
+    ----
+    pd.DataFrame: traj, cycle(轨迹内连续帧序号), timestep, n1..n6,
+        E35,E36,E45,E46, N11,N12,N21,N22
+    """
+    from LmpPy.utils.file_utils import iter_lammps_dump_frames
+
+    md_dirs: List[Path] = []
+    for root in aa_dirs:
+        root = Path(root)
+        npz = root / "reaction_frames.npz"
+        if npz.exists():
+            md_dirs.append(root)
+        else:
+            found = sorted(p.parent for p in root.rglob("reaction_frames.npz"))
+            if not found:
+                raise FileNotFoundError(f"目录下未找到任何 reaction_frames.npz: {root}")
+            md_dirs.extend(found)
+    if not md_dirs:
+        raise ValueError("未找到任何含 reaction_frames.npz 的目录")
+
+    # 按 md 编号分组(chunkN/mdM -> md=M),组内按 chunk 数字序串联
+    def _md_key(d: Path) -> str:
+        return d.parent.name if d.name.startswith("chunk") else d.name
+
+    def _chunk_key(d: Path) -> int:
+        try:
+            return int(d.parent.name.removeprefix("chunk"))
+        except ValueError:
+            return 0
+
+    traj_groups: Dict[str, List[Path]] = {}
+    for md_dir in md_dirs:
+        key = _md_key(md_dir)
+        traj_groups.setdefault(key, []).append(md_dir)
+    for key in traj_groups:
+        traj_groups[key].sort(key=_chunk_key)
+
+    all_rows = []
+    for traj_id, dirs in traj_groups.items():
+        n_traj_rows = 0
+        for md_dir in dirs:
+            npz_path = md_dir / "reaction_frames.npz"
+            traj = md_dir / "cg_trajectory.lammpstrj"
+            if not traj.exists():
+                raise FileNotFoundError(f"未找到轨迹文件: {traj}")
+
+            d = np.load(npz_path, allow_pickle=True)
+            # timestep -> 该帧新增键的通道列表(每帧通常恰好一个事件)
+            events_by_ts: Dict[int, List[str]] = {}
+            for i in range(len(d["timestep"])):
+                ts = int(d["timestep"][i])
+                m = d["cg_mapping_before"][i]
+                bt = {int(r[0]): int(r[2]) for r in m}
+                sb = set(map(tuple, np.sort(d["cg_bonds_before"][i][:, 1:3], axis=1)))
+                sa = set(map(tuple, np.sort(d["cg_bonds_after"][i][:, 1:3], axis=1)))
+                chans = []
+                for a, b in (sa - sb):
+                    t1, t2 = bt.get(a), bt.get(b)
+                    if t1 is None or t2 is None:
+                        continue
+                    ch = channel_of_pair(t1, t2)
+                    if ch:
+                        chans.append(ch)
+                events_by_ts[ts] = chans
+
+            # 事件帧取 ts - bond_react_check_step(反应前构型,与 LmpPy
+            # run_refactored.py 写出反应前帧的 timestep 标注间隔一致);
+            # 缺失则直接报错(不静默回退),提示核对检查间隔配置
+            rows_by_ts: Dict[int, dict] = {}
+            for frame in iter_lammps_dump_frames(str(traj)):
+                ts = int(frame["timestep"])
+                ev_ts = ts + bond_react_check_step
+                if ev_ts not in events_by_ts:
+                    continue
+                row = {"timestep": ev_ts}
+                row.update(count_types_frame(frame["types"]))
+                row.update(count_candidates_frame(
+                    frame["types"], frame["coords"],
+                    frame["box"][:, 1] - frame["box"][:, 0], pair_cutoff,
+                ))
+                rows_by_ts[ev_ts] = row
+
+            missing_ts = [ts for ts in events_by_ts if ts not in rows_by_ts]
+            if missing_ts:
+                raise ValueError(
+                    f"{md_dir}: 事件反应前帧(ts-{bond_react_check_step})"
+                    f"未在轨迹中找到: {missing_ts}; 请确认 bond_react_check_step "
+                    f"与该数据 lammps_params.yaml 的 steps.bond_react_check 一致"
+                )
+
+            for ts in sorted(events_by_ts):
+                row = rows_by_ts[ts]
+                for ch in CHANNELS:
+                    row[f"N{ch}"] = int(events_by_ts[ts].count(ch))
+                row["traj"] = traj_id
+                n_traj_rows += 1
+                row["cycle"] = n_traj_rows
+                all_rows.append(row)
+            if verbose:
+                print(f"[collect_aa] {md_dir}: {len(events_by_ts)} 事件帧完成")
+
+    return pd.DataFrame(all_rows)
+
+
 # ---------------------------------------------------------------------------
 # r 值估计
 # ---------------------------------------------------------------------------
@@ -215,7 +355,18 @@ def point_estimates(sub: pd.DataFrame) -> Dict[str, float]:
 
 
 def conversion_series(df: pd.DataFrame) -> pd.Series:
-    """总转化率序列 X(cycle) = 1 - (n5+n6)/(n5[0]+n6[0])。"""
+    """总转化率序列 X(c) = 1 - (n5+n6)(c)/(n5+n6)[轨迹首帧]。
+
+    含 traj 列时按轨迹分组,每条轨迹以自身首帧单体数为 n0
+    (AA 数据为跨 chunk 连续的多条独立轨迹);
+    无 traj 列时退化为全表首帧(mlcgsim 数据)。
+    """
+    if "traj" in df.columns:
+        out = np.empty(len(df))
+        for _, sub in df.groupby("traj", sort=False):
+            n0 = float(sub["n5"].iloc[0] + sub["n6"].iloc[0])
+            out[sub.index] = 1.0 - (sub["n5"] + sub["n6"]) / n0
+        return pd.Series(out, index=df.index, name="X")
     n0 = float(df["n5"].iloc[0] + df["n6"].iloc[0])
     return 1.0 - (df["n5"] + df["n6"]) / n0
 
@@ -248,9 +399,21 @@ def window_estimates(df: pd.DataFrame, n_windows: int) -> pd.DataFrame:
 def block_bootstrap(
     df: pd.DataFrame, n_blocks: int = 20, n_boot: int = 1000, seed: int = 0
 ) -> Dict[str, list]:
-    """按连续 cycle 块重抽样,输出各 r 估计的 95% 置信区间。"""
+    """按连续 cycle 块重抽样,输出各 r 估计的 95% 置信区间。
+
+    含 traj 列时块在**轨迹内**连续(每条轨迹切 n_blocks/轨迹数 块,
+    块池混合后重抽样),避免块横跨独立轨迹;
+    无 traj 列时按全表连续行切块(mlcgsim 数据)。
+    """
     rng = np.random.default_rng(seed)
-    blocks = [b for b in np.array_split(df, n_blocks) if len(b) > 0]
+    if "traj" in df.columns:
+        n_traj = int(df["traj"].nunique())
+        k = max(1, int(np.ceil(n_blocks / n_traj)))
+        blocks = []
+        for _, sub in df.groupby("traj", sort=False):
+            blocks.extend(b for b in np.array_split(sub, k) if len(b) > 0)
+    else:
+        blocks = [b for b in np.array_split(df, n_blocks) if len(b) > 0]
     keys = ["r1_bulk", "r1_cand", "r2_bulk", "r2_cand"]
     samples: Dict[str, List[float]] = {k: [] for k in keys}
     for _ in range(n_boot):
@@ -578,29 +741,33 @@ def analyze_reactivity_ratio(
     max_frames: Optional[int] = None,
     from_counts: Optional[str] = None,
     counts_out: Optional[str] = None,
+    from_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """竞聚率分析主入口。
 
-    三种用法:
+    四种用法:
     1. 全流程: 传 run_dirs + output_dir
     2. 只统计计数: 传 run_dirs + counts_out(不传 output_dir)
     3. 只做估计: 传 from_counts + output_dir
+    4. 直接传计数表: 传 from_df + output_dir(AA 数据入口内部复用)
     """
     if from_counts is not None:
         df = pd.read_csv(from_counts)
-        required = ({"cycle", "n5", "n6", "E35", "E36", "E45", "E46"}
-                    | {f"N{ch}" for ch in CHANNELS})
-        missing = required - set(df.columns)
-        if missing:
-            raise ValueError(f"counts 文件缺少列: {sorted(missing)}")
+    elif from_df is not None:
+        df = from_df
     else:
         if not run_dirs:
-            raise ValueError("必须提供 run_dirs 或 from_counts")
+            raise ValueError("必须提供 run_dirs、from_counts 或 from_df")
         df = collect_per_cycle_counts(run_dirs, pair_cutoff, max_frames)
         if counts_out:
             Path(counts_out).parent.mkdir(parents=True, exist_ok=True)
             df.to_csv(counts_out, index=False)
             print(f"[输出] per-cycle 计数表: {counts_out}")
+    required = ({"cycle", "n5", "n6", "E35", "E36", "E45", "E46"}
+                | {f"N{ch}" for ch in CHANNELS})
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"counts 数据缺少列: {sorted(missing)}")
 
     if output_dir is None:
         return df  # counts-only 模式
@@ -633,7 +800,10 @@ def analyze_reactivity_ratio(
             (n_events_total / n_cycles) / active_centers if active_centers > 0 else None
         ),
         "candidate_pairs_per_cycle": candidate_pairs,
-        "conversion_final": float(X.iloc[-1]),
+        "conversion_final": (
+            float(X.groupby(df["traj"], sort=False).last().mean())
+            if "traj" in df.columns else float(X.iloc[-1])
+        ),
         "zero_event_windows": int((win_primary["n_events"] == 0).sum()),
     }
     plot_r_vs_conversion(win_tables, global_est, boot, out_dir / "r_vs_conversion.png")
@@ -653,7 +823,228 @@ def analyze_reactivity_ratio(
     }
     with open(out_dir / "reactivity_ratio_summary.json", "w") as f:
         json.dump(_nan_to_none(summary), f, indent=2, ensure_ascii=False)
+
+    # 输出扩展: 浓度/通道事件演化数据与图、详细报告
+    source_desc = None
+    if from_counts is not None:
+        source_desc = f"from_counts: {from_counts}"
+    elif run_dirs:
+        source_desc = "run_dirs: " + ", ".join(str(d) for d in run_dirs)
+    write_evolution_outputs(df, out_dir)
+    write_detailed_report(
+        out_dir=out_dir,
+        df=df,
+        global_est=global_est,
+        boot=boot,
+        beta_ci=beta_ci,
+        ml_fit=ml_fit,
+        summary_diag=summary_diag,
+        params=summary["params"],
+        source_desc=source_desc,
+    )
+
     print(f"[输出] 分析结果目录: {out_dir}")
     print(f"  r1: bulk={global_est['r1_bulk']:.3f}, cand={global_est['r1_cand']:.3f}, ML={ml_fit['r1_ml']:.3f}")
     print(f"  r2: bulk={global_est['r2_bulk']:.3f}, cand={global_est['r2_cand']:.3f}, ML={ml_fit['r2_ml']:.3f}")
     return df
+
+
+def write_evolution_outputs(df: pd.DataFrame, out_dir: Path) -> None:
+    """输出浓度与通道事件的变化数据（evolution_data.csv）与演化图。
+
+    - 浓度: n5, n6, 单体总数, n6/n5, f1, 转化率 X 随 cycle 的变化
+    - 事件: N11/N12/N21/N22 每 cycle 值与累积值（含 traj 列时按轨迹分组累积）
+    """
+    out = pd.DataFrame({"cycle": df["cycle"]})
+    if "timestep" in df.columns:
+        out["timestep"] = df["timestep"]
+    if "traj" in df.columns:
+        out["traj"] = df["traj"]
+    out["n5"] = df["n5"].astype(float)
+    out["n6"] = df["n6"].astype(float)
+    out["n_monomer_total"] = out["n5"] + out["n6"]
+    out["n6_over_n5"] = out["n6"] / out["n5"].replace(0, np.nan)
+    out["f1"] = out["n5"] / out["n_monomer_total"].replace(0, np.nan)
+    out["X"] = conversion_series(df)
+    for ch in CHANNELS:
+        out[f"N{ch}"] = df[f"N{ch}"].astype(int)
+    out["N_total"] = sum(out[f"N{ch}"] for ch in CHANNELS)
+    if "traj" in df.columns:
+        for ch in CHANNELS:
+            out[f"N{ch}_cum"] = df.groupby("traj", sort=False)[f"N{ch}"].cumsum()
+        out["N_total_cum"] = out.groupby("traj", sort=False)["N_total"].cumsum()
+    else:
+        for ch in CHANNELS:
+            out[f"N{ch}_cum"] = df[f"N{ch}"].cumsum()
+        out["N_total_cum"] = out["N_total"].cumsum()
+    out.to_csv(out_dir / "evolution_data.csv", index=False)
+    print(f"[输出] 演化数据: {out_dir / 'evolution_data.csv'}")
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 9), sharex=True)
+    ax = axes[0]
+    ax.plot(out["cycle"], out["n5"], label="n5", lw=1.2)
+    ax.plot(out["cycle"], out["n6"], label="n6", lw=1.2)
+    ax.set_ylabel("monomer count")
+    ax.set_title("Monomer concentration evolution")
+    ax2 = ax.twinx()
+    ax2.plot(out["cycle"], out["X"], "k--", alpha=0.6, label="conversion X")
+    ax2.set_ylabel("conversion X")
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, fontsize=9, loc="upper right")
+
+    ax = axes[1]
+    for ch in CHANNELS:
+        ax.plot(out["cycle"], out[f"N{ch}_cum"], label=f"N{ch} (cum)", lw=1.2)
+    ax.plot(out["cycle"], out["N_total_cum"], "k--", label="total (cum)", lw=1.5)
+    ax.set_xlabel("cycle")
+    ax.set_ylabel("cumulative events")
+    ax.set_title("Channel event evolution (cumulative)")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_dir / "evolution.png", dpi=150)
+    plt.close(fig)
+    print(f"[输出] 演化图: {out_dir / 'evolution.png'}")
+
+
+def write_detailed_report(
+    out_dir: Path,
+    df: pd.DataFrame,
+    global_est: Dict[str, float],
+    boot: Dict[str, list],
+    beta_ci: Dict[str, list],
+    ml_fit: Dict[str, float],
+    summary_diag: Dict,
+    params: Dict,
+    source_desc: Optional[str] = None,
+) -> Path:
+    """输出详细 report.txt: 数据源、设置、事件/浓度统计、估计与 CI 的完整总结。"""
+    report_file = out_dir / "report.txt"
+    n_events = {ch: int(df[f"N{ch}"].sum()) for ch in CHANNELS}
+    n_total = sum(n_events.values())
+    X = conversion_series(df)
+
+    lines = []
+    lines.append("=" * 70)
+    lines.append("竞聚率分析详细报告 (reactivity ratio analysis report)")
+    lines.append("=" * 70)
+
+    lines.append("\n## 数据源")
+    if source_desc:
+        lines.append(f"  {source_desc}")
+    if "traj" in df.columns:
+        lines.append(f"  轨迹数: {df['traj'].nunique()}")
+        for t, n in df.groupby("traj", sort=False).size().items():
+            lines.append(f"    {t}: {n} 行 (事件帧)")
+    lines.append(f"  总行数(cycle): {len(df)}")
+
+    lines.append("\n## 参数设置")
+    for k, v in params.items():
+        lines.append(f"  {k}: {v}")
+
+    lines.append("\n## 事件统计")
+    for ch in CHANNELS:
+        pct = n_events[ch] / n_total * 100 if n_total else 0.0
+        lines.append(f"  N{ch} ({CHANNELS[ch][0]}+{CHANNELS[ch][1]}): "
+                     f"{n_events[ch]} ({pct:.2f}%)")
+    lines.append(f"  事件总数: {n_total}")
+    if n_total:
+        lines.append(f"  N11/N12 = {n_events['11'] / n_events['12']:.4f}  "
+                     f"N22/N21 = {n_events['22'] / n_events['21']:.4f}")
+
+    lines.append("\n## 浓度统计 (每 cycle 帧)")
+    for col, label in [("n5", "n5 (A 单体)"), ("n6", "n6 (B 单体)")]:
+        s = df[col].astype(float)
+        lines.append(f"  {label}: 首={s.iloc[0]:.1f} 末={s.iloc[-1]:.1f} "
+                     f"min={s.min():.1f} max={s.max():.1f} mean={s.mean():.1f}")
+    r = df["n6"].astype(float) / df["n5"].astype(float).replace(0, np.nan)
+    lines.append(f"  n6/n5: 首={r.iloc[0]:.4f} 末={r.iloc[-1]:.4f} mean={r.mean():.4f}")
+    f1 = df["n5"].astype(float) / (df["n5"].astype(float) + df["n6"].astype(float))
+    lines.append(f"  f1 (A 单体摩尔分率): 首={f1.iloc[0]:.4f} 末={f1.iloc[-1]:.4f} "
+                 f"mean={f1.mean():.4f}")
+    lines.append(f"  转化率 X: 首={X.iloc[0]:.4f} 末={X.iloc[-1]:.4f} "
+                 f"max={X.max():.4f}")
+    lines.append(f"  转化率最终(按轨迹平均): {summary_diag.get('conversion_final')}")
+
+    lines.append("\n## 竞聚率点估计")
+    for k, v in global_est.items():
+        lines.append(f"  {k} = {v:.4f}" if isinstance(v, float) else f"  {k} = {v}")
+
+    lines.append("\n## 置信区间 (95%)")
+    for k, v in boot.items():
+        if v and v[0] is not None:
+            lines.append(f"  {k}: [{v[0]:.4f}, {v[1]:.4f}]")
+        else:
+            lines.append(f"  {k}: 不可用")
+    lines.append("  (beta 解析区间)")
+    for k, v in beta_ci.items():
+        if v and v[0] is not None:
+            lines.append(f"  {k}: [{v[0]:.4f}, {v[1]:.4f}]")
+        else:
+            lines.append(f"  {k}: 不可用")
+
+    lines.append("\n## Mayo-Lewis 组成法拟合 (Meyer-Lowry 积分形式)")
+    for k, v in ml_fit.items():
+        lines.append(f"  {k} = {v}")
+
+    lines.append("\n## 诊断量")
+    for k, v in summary_diag.items():
+        lines.append(f"  {k}: {v}")
+
+    lines.append("\n## 输出文件清单")
+    for name in ["reactivity_ratio_summary.json", "window_estimates.csv",
+                 "evolution_data.csv", "evolution.png",
+                 "r_vs_conversion.png", "channel_rates.png",
+                 "composition_mayo_lewis.png", "summary_dashboard.png"]:
+        lines.append(f"  - {name}")
+    lines.append("=" * 70)
+
+    report_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"[输出] 详细报告: {report_file}")
+    return report_file
+
+
+def analyze_reactivity_ratio_aa(
+    aa_dirs: Optional[Sequence] = None,
+    output_dir: Optional[str] = None,
+    windows: int = 20,
+    pair_cutoff: float = 10.0,
+    bond_react_check_step: int = 1,
+    blocks: int = 20,
+    n_boot: int = 1000,
+    seed: int = 0,
+    counts_out: Optional[str] = None,
+) -> pd.DataFrame:
+    """AA bond/react 数据竞聚率分析入口(复用 analyze_reactivity_ratio 估计逻辑)。
+
+    三种用法:
+    1. 全流程: 传 aa_dirs + output_dir
+    2. 只统计计数: 传 aa_dirs + counts_out(不传 output_dir)
+    3. 只做估计: 用 reactivity-ratio --from-counts(counts_out 产物)
+
+    bond_react_check_step 需与该数据 lammps_params.yaml 的
+    steps.bond_react_check 一致(默认 1)。
+    """
+    if not aa_dirs:
+        raise ValueError("必须提供 aa_dirs")
+    df = collect_per_cycle_counts_aa(
+        aa_dirs, pair_cutoff, bond_react_check_step=bond_react_check_step
+    )
+    if counts_out:
+        Path(counts_out).parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(counts_out, index=False)
+        print(f"[输出] per-frame 计数表: {counts_out}")
+    if output_dir is None:
+        return df
+    return analyze_reactivity_ratio(
+        output_dir=output_dir,
+        windows=windows,
+        blocks=blocks,
+        n_boot=n_boot,
+        seed=seed,
+        from_df=df,
+    )

@@ -305,3 +305,76 @@ def test_analyze_from_counts(tmp_path):
     diag = summary["diagnostics"]
     assert diag["events_per_active_center"] > 0
     assert diag["candidate_pairs_per_cycle"] > 0
+
+
+# ---------------------------------------------------------------------------
+# AA bond/react 数据路径 (collect_per_cycle_counts_aa)
+# ---------------------------------------------------------------------------
+
+from LmpPy.output_analysis.reactivity_ratio import collect_per_cycle_counts_aa
+
+
+def _write_aa_dump_frame(f, ts, atoms, box=20.0):
+    """写单帧 lammpstrj（id type x y z）。"""
+    f.write("ITEM: TIMESTEP\n")
+    f.write(f"{ts}\n")
+    f.write(f"ITEM: NUMBER OF ATOMS\n{len(atoms)}\n")
+    f.write("ITEM: BOX BOUNDS pp pp pp\n")
+    f.write(f"0.0 {box}\n0.0 {box}\n0.0 {box}\n")
+    f.write("ITEM: ATOMS id type x y z\n")
+    for a in atoms:
+        f.write(" ".join(str(v) for v in a) + "\n")
+
+
+def _write_minimal_aa_md_dir(md_dir: Path, event_ts: int, check_step: int) -> None:
+    """写最小 AA md 目录: 单个 3+5 事件, 反应前帧间隔 check_step。"""
+    md_dir.mkdir(parents=True)
+    # 2 个 bead: id1=type3(E 端), id2=type5(E 单体); 事件后新增键 1-2
+    # cg_mapping_before 行格式: [bead_id, mol_id, bead_type, AA_id, mass]
+    mapping = np.array([[[1.0, 1.0, 3.0, 1.0, 28.0],
+                         [2.0, 2.0, 5.0, 2.0, 28.0]]])
+    bonds_before = np.empty(1, dtype=object)
+    bonds_before[0] = np.empty((0, 3), dtype=np.int64)
+    bonds_after = np.empty(1, dtype=object)
+    bonds_after[0] = np.array([[1, 1, 2]], dtype=np.int64)  # [bond_type, a1, a2]
+    np.savez(
+        md_dir / "reaction_frames.npz",
+        timestep=np.array([event_ts], dtype=np.int64),
+        cg_mapping_before=mapping,
+        cg_bonds_before=bonds_before,
+        cg_bonds_after=bonds_after,
+    )
+    atoms = [(1, 3, 1.0, 1.0, 1.0), (2, 5, 2.0, 1.0, 1.0)]
+    with open(md_dir / "cg_trajectory.lammpstrj", "w") as f:
+        _write_aa_dump_frame(f, event_ts - check_step, atoms)  # 反应前帧
+        _write_aa_dump_frame(f, event_ts, atoms)               # 反应后帧
+
+
+def test_collect_per_cycle_counts_aa_check_step(tmp_path):
+    """AA 路径: 反应前帧 = 事件 ts - bond_react_check_step, 间隔非 1 时须显式传参。"""
+    md_dir = tmp_path / "chunk1" / "md1"
+    _write_minimal_aa_md_dir(md_dir, event_ts=1000, check_step=5)
+
+    # 默认 check_step=1 时找 ts-1=999 帧失败 -> 报错并提示核对参数
+    with pytest.raises(ValueError, match="bond_react_check_step"):
+        collect_per_cycle_counts_aa([md_dir], verbose=False)
+
+    # 正确传入 check_step=5 -> 命中 ts-5=995 反应前帧
+    df = collect_per_cycle_counts_aa(
+        [md_dir], pair_cutoff=10.0, bond_react_check_step=5, verbose=False
+    )
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["timestep"] == 1000 and row["traj"] == "md1" and row["cycle"] == 1
+    assert row["N11"] == 1 and row["N12"] == 0
+    assert row["n3"] == 1 and row["n5"] == 1  # 反应前: 单体未消耗、类型未变
+    assert row["E35"] == 1  # 端(1,1,1)与单体(2,1,1)距离 1 < 10
+
+
+def test_collect_per_cycle_counts_aa_default_check_step(tmp_path):
+    """AA 路径: bond_react_check_step=1 (默认) 时取 ts-1 帧, 保持旧行为。"""
+    md_dir = tmp_path / "chunk1" / "md2"
+    _write_minimal_aa_md_dir(md_dir, event_ts=6401, check_step=1)
+    df = collect_per_cycle_counts_aa([md_dir], pair_cutoff=10.0, verbose=False)
+    assert len(df) == 1
+    assert df.iloc[0]["timestep"] == 6401 and df.iloc[0]["N11"] == 1
