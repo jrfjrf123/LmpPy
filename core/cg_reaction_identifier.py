@@ -208,10 +208,15 @@ def load_template_signatures(reactions_dir: Path) -> Tuple[
         if interior_bead is None:
             continue
 
-        interior_type = pre_bead_types[interior_bead]
+        interior_type_raw = pre_bead_types[interior_bead]
         end_type = pre_bead_types[end_bead]
         monomer_type = pre_bead_types[monomer_bead]
-        sig_3bead = (interior_type, end_type, monomer_type)
+        # interior 类型可能为列表（如 [1, 2]），表示链上前驱 bead 的多种可能类型；
+        # 为每个变体生成一条 3-bead 签名（其余信息共享）。
+        if isinstance(interior_type_raw, list):
+            interior_type_variants = interior_type_raw
+        else:
+            interior_type_variants = [interior_type_raw]
 
         # 6. 构建 pre_chains
         edge_bead_ids = {atom_to_bead[e] for e in edge_ids if e in atom_to_bead}
@@ -234,7 +239,8 @@ def load_template_signatures(reactions_dir: Path) -> Tuple[
         type_map: Dict[int, int] = {}
         for bid, pre_type in pre_bead_types.items():
             post_type = post_bead_types.get(bid, pre_type)
-            if pre_type != post_type:
+            # 列表类型（interior 变体）不参与类型映射
+            if isinstance(pre_type, int) and pre_type != post_type:
                 type_map[pre_type] = post_type
 
         # 8. 构建 bead_id_map
@@ -250,19 +256,21 @@ def load_template_signatures(reactions_dir: Path) -> Tuple[
             if pre_bead is not None and post_bead is not None and pre_bead != post_bead:
                 bead_id_map[pre_bead] = post_bead
 
-        # 9. 索引
-        sig = CGReactionSignature(
-            name=rxn_name,
-            signature_3bead=sig_3bead,
-            pre_chains=pre_chains,
-            type_map=type_map,
-            bead_id_map=bead_id_map,
-        )
-        signature_index[sig_3bead].append(sig)
-        all_signatures.append(sig)
+        # 9. 索引（interior 多类型变体各生成一条签名）
+        for interior_type in interior_type_variants:
+            sig_3bead = (interior_type, end_type, monomer_type)
+            sig = CGReactionSignature(
+                name=rxn_name,
+                signature_3bead=sig_3bead,
+                pre_chains=pre_chains,
+                type_map=type_map,
+                bead_id_map=bead_id_map,
+            )
+            signature_index[sig_3bead].append(sig)
+            all_signatures.append(sig)
+            interior_types.add(interior_type)
         end_types.add(end_type)
         monomer_types.add(monomer_type)
-        interior_types.add(interior_type)
 
     return (dict(signature_index), all_signatures, end_types, monomer_types, interior_types)
 
