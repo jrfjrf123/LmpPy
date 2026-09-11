@@ -4,6 +4,11 @@
 # 本文件定义环氧树脂(EPR)体系的粗粒化(CG)映射配置。
 # 适用于 bond/react 模板匹配建键模式。
 #
+# 【注意】本目录是字段参考骨架，不是可直接运行的完整配置：
+#         此处 mapping_files 引用的 mapping YAML 与 files.data_file 指向的
+#         .data 文件均不存在，需自行准备。可直接运行的完整示例见
+#         docs/examples/（mini_test 体系）。
+#
 # 体系说明:
 #   - 环氧树脂聚合反应（EPR 体系）
 #   - 包含多种单体分子（dimer_EE, dimer_EP, ethylene, propylene 等）

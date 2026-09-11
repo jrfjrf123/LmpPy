@@ -17,17 +17,17 @@ npt:
 
 bond_react:
   stabilization: 0.03       # stabilization参数
-  reactions:
-    - name: "rxn1"
-      cutoff: 3.0           # 反应截断半径
-      map_file: "rxn1.map"
-      pre_mol: "mol1"
-      post_mol: "mol2"
-    - name: "rxn2"
-      cutoff: 3.0
-      map_file: "rxn2.map"
-      pre_mol: "mol3"
-      post_mol: "mol4"
+  # reactions:              # 本示例目录未附带反应模板，故留空。
+  #   - name: "rxn1"        # reactions/ 下缺少子目录时加载会直接报错，
+  #     cutoff: 3.0         # 故此处整体注释。需要反应时请先补齐
+  #     map_file: "rxn1.map" # reactions/{name}/ 下的 map + pre/post 模板 +
+  #     pre_mol: "mol1"      # pre/post mapping，再取消注释。
+  #     post_mol: "mol2"
+  #   - name: "rxn2"
+  #     cutoff: 3.0
+  #     map_file: "rxn2.map"
+  #     pre_mol: "mol3"
+  #     post_mol: "mol4"
 
 files:
   input_script: "in.epoxy.stabilized"

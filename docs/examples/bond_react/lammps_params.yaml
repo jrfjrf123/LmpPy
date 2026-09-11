@@ -1,7 +1,13 @@
 # =============================================================================
 # lammps_params.yaml — bond/react 模式 LAMMPS 参数示例 (EPR 体系)
 # =============================================================================
-# 本文件定义 bond/react 模式下的完整 LAMMPS 运行参数。
+# 【注意】本目录是字段参考骨架，不是可直接运行的完整配置：
+#         同目录只有 system.yaml 与 lammps_params.yaml，system.yaml 引用的
+#         mapping YAML 与 .data 文件、以及此处 reactions 段所需的
+#         reactions/rxn1/ 目录（rxn1.map + pre/post 模板）均需自行准备。
+#         可直接运行的完整示例见 docs/examples/（mini_test 体系）。
+#
+# 本文件定义 bond/react 模式下的 LAMMPS 运行参数。
 # 包含一个示例反应配置（rxn1），适用于环氧树脂聚合体系。
 #
 # 使用说明:

@@ -3,6 +3,12 @@
 
 system:
   name: "环氧树脂固化体系"
+  # bead 类型名 → LAMMPS type 编号（必需字段，名称须与 mapping 文件
+  # site-types 中的键一致）
+  bead_type_names:
+    Head: 1
+    Mid: 2
+    End: 3
   mapping_files:
     - path: "mapping/mapping_epoxy.yaml"
       copies: 1
