@@ -227,10 +227,14 @@ def cmd_convert_data(args):
     print(f"  Beads: {cg_data['natoms']}")
 
     # 写入CG data
+    # 质量必须用 CG bead 质量（mapping 求和），不能沿用 AA mass_list：
+    # 旧代码传 aa_data['mass_list']，CG data 里写的是 AA 原子质量
+    # （cispip 单珠型下仅影响时间标度未暴露；多珠型体系会让轻珠飞出导致 IBI 爆炸）
+    cg_mass_dict = build_cg_mass_dict(cg_data, mapping)
     write_cg_data_file(
         args.output, cg_data,
         cg_data.get('bonds'), cg_data.get('angles'), cg_data.get('dihedrals'),
-        mass_list=aa_data['mass_list']
+        mass_list=cg_mass_dict
     )
 
     # 可选：输出XYZ（unwrap格式）

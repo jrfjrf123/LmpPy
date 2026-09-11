@@ -160,7 +160,9 @@ def write_cg_data_file(filename: str, cg_data: Dict, cg_bonds: np.ndarray = None
 
     # 获取唯一类型
     unique_types = np.unique(types)
-    n_types = len(unique_types)
+    # LAMMPS 要求 Masses/系数中的类型号 ≤ 头部声明的 atom types 总数，
+    # 因此按最大类型号声明（全局类型编号可能有空缺，如纯单体体系只用 3/4）
+    n_types = int(unique_types.max())
 
     n_bond_types = len(np.unique(cg_bonds[:, 0])) if n_bonds > 0 else 0
     n_angle_types = len(np.unique(cg_angles[:, 0])) if n_angles > 0 else 0
@@ -192,10 +194,11 @@ def write_cg_data_file(filename: str, cg_data: Dict, cg_bonds: np.ndarray = None
         f.write(f"{box[1, 0]:.6f} {box[1, 1]:.6f} ylo yhi\n")
         f.write(f"{box[2, 0]:.6f} {box[2, 1]:.6f} zlo zhi\n\n")
 
-        # 质量
+        # 质量（覆盖 1..n_types 全部类型号；体系中不存在的幽灵类型给默认质量，
+        # LAMMPS 不会因缺质量报错，且这些类型没有原子不参与动力学）
         if mass_list:
             f.write("Masses\n\n")
-            for bead_type in sorted(unique_types):
+            for bead_type in range(1, n_types + 1):
                 mass = mass_list.get(bead_type, 1.0)
                 f.write(f"{bead_type} {mass:.6f}\n")
             f.write("\n")
