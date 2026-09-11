@@ -633,6 +633,31 @@ reactions:
       - [3, 4]
 ```
 
+#### 推荐生产配置（AA-AM 自由基共聚，SCUT_HPC1 实测可用，2026-08-21）
+
+以下组合在含 20 条种子链 + 1000 自由单体（10480 原子）的 GAFF 体系上
+实测跑通，可作为 bond/react 生产运行的起点：
+
+```yaml
+steps:
+  bond_react_check: 1     # 每步检查反应：反应发生后立刻进入稳定化，
+                          # 避免新成键原子在普通 NPT 下被拖过 domain 边界
+                          # （check=500 实测会在 run 段中途崩于
+                          #  "Bond atoms ... missing on proc"）
+  run_per_loop: 500       # = check(1) + nve_limit(300) + normal npt(199)
+  nve_limit: 300          # 反应后稳定化段（reaction_atom 走 nve/limit）
+
+bond_react:
+  stabilization: 0.04     # nve/limit 最大步位移 xmax（Å）；
+                          # 0.005 太小，反应后几何来不及弛豫
+  reactions:
+    - name: "rxn1"
+      cutoff: 3.0         # 截断收紧到 3.0 Å，减少误匹配（默认 4.0 偏松）
+      ...
+```
+
+详见 `docs/pre_data_gen/pitfalls.md` §9。
+
 ---
 
 ### 2.5 bond_create (v2.6+) - bond/create 配置
