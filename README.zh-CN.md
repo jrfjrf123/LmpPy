@@ -206,43 +206,54 @@ LmpPy/
 
 ## 依赖项与安装
 
-### 必需依赖
+### 1. 创建虚拟环境（conda）
 
 ```bash
-# Python >= 3.9
-# numpy / pandas / pyyaml 由 core/ 与 utils/ 在导入期无条件加载
+conda create -n lmp_py_react python=3.10 -y
+conda activate lmp_py_react
+```
+
+`pyproject.toml` 要求 Python >= 3.9，推荐 3.10。不用 conda 时等价的 `venv` 做法：
+
+```bash
+python -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
+```
+
+后续所有 `pip` 命令都应在该环境下执行（`conda activate` 后 shell 提示符会显示环境名）。
+
+### 2. 安装依赖
+
+必需依赖由 `core/` 与 `utils/` 在导入期无条件加载：
+
+```bash
 pip install numpy pandas pyyaml
 ```
 
-### 可选依赖
+Numba 强烈推荐（`find_molecules` 与 `unwrap_coords` 的 JIT 加速），缺失时回退纯 Python：
 
 ```bash
-# Numba JIT 加速（强烈推荐；用于 find_molecules 与 unwrap_coords）
 pip install numba
+```
 
-# MPI 支持（并行运行必需）
-pip install mpi4py
+其余功能按 `pyproject.toml` 声明的 extras 分组安装。**先 `cd` 到含有 `pyproject.toml` 的仓库根目录**，再按需选择：
 
-# 后处理分析与绘图（output_analysis/、scripts/）
-pip install scipy matplotlib seaborn tqdm
+```bash
+pip install ".[mpi]"        # mpi4py —— MPI 并行运行
+pip install ".[analysis]"   # scipy / matplotlib / seaborn / tqdm —— 后处理分析与绘图
+pip install ".[tools]"      # MDAnalysis / scikit-optimize —— GROMACS 转换与 IBI 势函数拟合
+pip install ".[dev]"        # pytest / black —— 开发与测试
+```
 
-# GROMACS 转换与 IBI 势函数拟合（tools/）
-pip install MDAnalysis scikit-optimize
+一次装齐除 LAMMPS 之外的全部依赖：
 
-# LAMMPS Python 接口（运行模拟必需，需编译 LAMMPS 并启用 PYTHON 包）
+```bash
+pip install ".[mpi,analysis,tools,dev]"
 ```
 
 `numba`、`mpi4py` 与 LAMMPS Python 接口均在 `try`/`except` 中导入：缺失时 LmpPy 会回退到纯 Python 实现，或打印警告并以测试模式运行，因此最小环境下包仍可正常导入。
 
-上述分组在 `pyproject.toml` 中同时声明为 extras —— `[mpi]`、`[analysis]`、`[tools]`、`[dev]`。
-
-### 完整安装
-
-```bash
-pip install numpy pandas pyyaml numba mpi4py scipy matplotlib seaborn tqdm
-```
-
-### LAMMPS 编译
+### 3. LAMMPS 编译
 
 需要编译支持 Python 接口的 LAMMPS：
 

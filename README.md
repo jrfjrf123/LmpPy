@@ -206,44 +206,54 @@ LmpPy/
 
 ## Dependencies and Installation
 
-### Required Dependencies
+### 1. Create a Virtual Environment (conda)
 
 ```bash
-# Python >= 3.9
-# numpy / pandas / pyyaml are imported unconditionally by core/ and utils/
+conda create -n lmp_py_react python=3.10 -y
+conda activate lmp_py_react
+```
+
+`pyproject.toml` requires Python >= 3.9; 3.10 is recommended. Without conda, the equivalent `venv` setup is:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
+```
+
+Every `pip` command below must be run inside that environment (the shell prompt shows the environment name after `conda activate`).
+
+### 2. Install Dependencies
+
+The required dependencies are imported unconditionally by `core/` and `utils/`:
+
+```bash
 pip install numpy pandas pyyaml
 ```
 
-### Optional Dependencies
+Numba is strongly recommended (JIT acceleration for `find_molecules` and `unwrap_coords`); without it LmpPy falls back to pure Python:
 
 ```bash
-# Numba JIT acceleration (strongly recommended; used by find_molecules and unwrap_coords)
 pip install numba
+```
 
-# MPI support (required for parallel execution)
-pip install mpi4py
+The remaining functionality is grouped into extras declared in `pyproject.toml`. **`cd` into the repository root containing `pyproject.toml` first**, then pick what you need:
 
-# Post-processing analysis and plotting (output_analysis/, scripts/)
-pip install scipy matplotlib seaborn tqdm
+```bash
+pip install ".[mpi]"        # mpi4py — MPI parallel execution
+pip install ".[analysis]"   # scipy / matplotlib / seaborn / tqdm — post-processing analysis and plotting
+pip install ".[tools]"      # MDAnalysis / scikit-optimize — GROMACS conversion and IBI potential fitting
+pip install ".[dev]"        # pytest / black — development and testing
+```
 
-# GROMACS conversion and IBI potential fitting (tools/)
-pip install MDAnalysis scikit-optimize
+To install everything except LAMMPS in one go:
 
-# LAMMPS Python interface (required for running simulations; requires compiling
-# LAMMPS with the PYTHON package enabled)
+```bash
+pip install ".[mpi,analysis,tools,dev]"
 ```
 
 `numba`, `mpi4py` and the LAMMPS Python interface are all imported inside `try`/`except` blocks: if they are missing, LmpPy falls back to pure-Python implementations or prints a warning and runs in test mode, so the package remains importable in a minimal environment.
 
-These groups are also declared as extras in `pyproject.toml` — `[mpi]`, `[analysis]`, `[tools]`, `[dev]`.
-
-### Full Installation
-
-```bash
-pip install numpy pandas pyyaml numba mpi4py scipy matplotlib seaborn tqdm
-```
-
-### Compiling LAMMPS
+### 3. Compiling LAMMPS
 
 LAMMPS must be compiled with Python interface support:
 
