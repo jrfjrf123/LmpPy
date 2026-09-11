@@ -1,11 +1,14 @@
-# LmpPy - LAMMPS Bond/React 后处理框架 v2.6
+# LmpPy - LAMMPS Bond/React 后处理框架 v2.7
 
-> 版本: 2.6
-> 日期: 2026-06-22
-> 语言: 中文
 > [English](README.md) | 中文
 
-LmpPy 是一个用于 LAMMPS `bond/react` 和 `bond/create` 模拟的后处理框架。它实时将全原子模拟转换为粗粒化（CG）轨迹、检测并记录化学反应事件、自动更新反应后的 CG 映射和拓扑结构，并提供丰富的后处理分析工具。
+> 版本: 2.7
+> 日期: 2026-09-11
+> 语言: 中文
+
+LmpPy 是面向高分子反应体系的 LAMMPS `bond/react` 与 `bond/create` 模拟后处理框架。它实时将全原子（AA）模拟转换为粗粒化（CG）轨迹，检测并记录成键与断键事件，自动更新反应后的 CG 映射与拓扑结构，并提供丰富的后处理分析工具。
+
+框架面向高分子材料的多尺度建模：自由基共聚、环氧开环、聚氨酯逐步聚合、交联网络等。除轨迹转换外，它还为迭代玻尔兹曼反演（IBI）势函数开发提供所需的 CG 分布数据，并为在 CG 层面替代 `bond/react` 的机器学习模型提供逐事件训练样本。
 
 ---
 
@@ -37,8 +40,8 @@ LmpPy 是一个用于 LAMMPS `bond/react` 和 `bond/create` 模拟的后处理�
 
 ### 核心功能
 
-1. **CG 轨迹生成** — 实时将全原子轨迹转换为粗粒化轨迹
-2. **反应监测** — 检测化学反应事件并统计反应次数（支持 bond/react 和 bond/create 两种模式）
+1. **CG 轨迹生成** — 实时将反应体系的全原子轨迹转换为粗粒化轨迹
+2. **反应监测** — 检测成键与断键事件并按周期统计（支持 bond/react 和 bond/create 两种模式），为单体转化率与竞聚率统计提供原始数据
 3. **CG 映射更新** — 反应后自动更新原子到 bead 的映射关系
 4. **CG 拓扑推导** — 从键连信息推导粗粒化键、角、二面角
 5. **断点续算** — 支持从上一次运行的最终状态继续计算
@@ -47,8 +50,10 @@ LmpPy 是一个用于 LAMMPS `bond/react` 和 `bond/create` 模拟的后处理�
 
 | 特性 | 说明 |
 |------|------|
-| **多体系支持** | 通过配置文件定义不同化学反应体系（环氧树脂、聚氨酯、交联网络等） |
+| **多体系支持** | 通过配置文件定义不同高分子反应体系（自由基共聚、环氧开环、聚氨酯逐步聚合、交联网络等） |
 | **双建键模式** | bond/react 模板匹配 + bond/create 距离条件，覆盖不同场景 |
+| **势函数开发** | IBI 迭代玻尔兹曼反演链路：CG 分布 → 玻尔兹曼反演 → 表格势函数，支持异核 bead 对的交叉混合 |
+| **GROMACS 互通** | 将 GROMACS `top` + `gro`（GAFF）体系转换为 LAMMPS `data` 文件，复用已有全原子力场 |
 | **配置驱动** | 所有参数通过 YAML 配置文件定义，无需修改代码 |
 | **高性能** | 向量化/Numba 优化关键计算，部分操作加速 30–300 倍 |
 | **MPI 并行** | 支持多进程并行运行 |
@@ -66,11 +71,13 @@ LmpPy 是一个用于 LAMMPS `bond/react` 和 `bond/create` 模拟的后处理�
 
 ### 数据流（三仓库管线）
 
-LmpPy 是更大数据流管线的第一环，与以下仓库协作：
+LmpPy 是更大规模多尺度管线的第一环，与以下仓库协作：
 
 ```
 LmpPy (CG后处理) → SOAP_calc_and_Feature_select (SOAP计算+特征筛选) → mlcgsim (XGBoost驱动)
 ```
+
+全原子阶段产出反应事件与 CG 映射；SOAP 描述符在反应键附近计算并筛选为紧凑特征集；基于该特征集训练的 XGBoost 分类器随后在 CG 模拟中驱动反应，运行时不再调用 `bond/react`。
 
 详见 [docs/workflow.md](docs/workflow.md) 的完整数据流说明。
 
@@ -82,7 +89,10 @@ LmpPy (CG后处理) → SOAP_calc_and_Feature_select (SOAP计算+特征筛选) �
 LmpPy/
 ├── __init__.py                       # 包入口
 ├── run_refactored.py                 # 主入口脚本 (LAMMPSReactionRunner)
+├── pyproject.toml                    # 包元数据与依赖声明
 ├── test_integration.py               # 集成测试
+├── test_gmx2lmp_data.py              # gmx2lmp_data 测试套件
+├── test_reactivity_ratio.py          # 竞聚率统计测试套件
 │
 ├── core/                             # 核心功能模块
 │   ├── __init__.py                   # 导出所有核心类和函数
@@ -105,10 +115,12 @@ LmpPy/
 │
 ├── output_analysis/                  # 后处理分析子包 (v2.6+)
 │   ├── __init__.py
+│   ├── __main__.py                   # `python -m LmpPy.output_analysis` 入口
 │   ├── cli.py                        # 统一 CLI 入口
 │   ├── chain_length.py               # 链长分布分析
 │   ├── distance.py                   # 反应距离分布分析
 │   ├── reaction_stats.py             # 反应统计
+│   ├── reactivity_ratio.py           # 竞聚率 r1/r2 估计（CG 与 AA 两条路径）
 │   ├── js_divergence.py              # JS 散度计算
 │   ├── loader.py                     # 数据加载工具
 │   ├── theory.py                     # 理论分布模型 (Schulz-Zimm, Poisson, Log-normal)
@@ -128,32 +140,47 @@ LmpPy/
 │   │   ├── data_converter.py         # LAMMPS data 转换
 │   │   ├── trj_converter.py          # 轨迹转换
 │   │   └── mapping_utils.py          # 映射工具函数
-│   ├── ibm_potential/                # IBM 势能计算
+│   ├── ibm_potential/                # IBM / IBI 势能计算
 │   │   ├── config.py                 # 配置加载
 │   │   ├── distribution.py           # 分布计算
 │   │   ├── boltzmann.py              # 玻尔兹曼反演
-│   │   └── lammps_table.py           # LAMMPS table 生成
+│   │   ├── lammps_table.py           # LAMMPS table 生成
+│   │   ├── tabulated_potential.py    # 表格势函数解析/拟合/绘图
+│   │   ├── gromacs_loader.py         # GROMACS 轨迹读取
+│   │   ├── pickle_loader.py          # pickle 格式 CG 轨迹读取
+│   │   ├── dist_config.py            # 分布绘图配置
+│   │   └── dist_plot.py              # 分布绘图
 │   └── smooth_utils/                 # 分布平滑工具包
 │       ├── core.py / cli.py / constants.py / io.py
 │       ├── preprocess.py / peaks.py / zones.py / quality.py
 │       ├── optimize.py / angle_dihedral.py
-│       ├── report.py / dist_config.py / dist_plot.py
+│       └── report.py
 │
 ├── scripts/                          # CLI 脚本
+│   ├── build_cg_config.py            # 生成 CG 配置
 │   ├── build_cg_system.py            # 构建 CG 体系 LAMMPS data 文件
+│   ├── gmx2lmp_data.py               # GROMACS top+gro → LAMMPS data 转换
 │   ├── convert_aa2cg.py              # AA→CG 转换 CLI
 │   ├── generate_initial_mapping.py   # 生成初始 CG 映射
-│   ├── smooth_distribution.py        # 分布平滑 CLI
-│   ├── calc_ibm_potential.py         # IBM 势能计算 CLI
-│   ├── calc_dist.py                  # 分布计算 CLI
-│   ├── plot_dist.py                  # 分布绘图 CLI
 │   ├── yaml2csv_mapping.py           # YAML→CSV 映射转换
 │   ├── data2gro.py                   # LAMMPS data 转 GRO
+│   ├── smooth_distribution.py        # 分布平滑 CLI
+│   ├── calc_dist.py                  # 分布计算 CLI
+│   ├── plot_dist.py                  # 分布绘图 CLI
+│   ├── calc_ibm_potential.py         # IBM 势能计算 CLI
+│   ├── calc_ibm_potential_from_dist.py # 从已有分布计算 IBM 势能
+│   ├── fit_tabulated.py              # 表格势函数解析拟合
+│   ├── mix_cross_tabulated.py        # 异核表格势函数交叉混合
+│   ├── plot_tabulated.py             # 表格势函数绘图
+│   ├── extract_reaction_frame.py     # 提取单个反应帧用于可视化
+│   ├── validate_config.py            # 配置验证
 │   └── test_smoke_run.py             # 冒烟测试独立运行脚本
 │
 ├── config/                           # 配置文件模板
-│   ├── mapping/                      # CG 映射配置模板
-│   └── reactions/                    # 反应模板配置
+│   ├── system.yaml                   # 体系配置模板
+│   ├── lammps_params.yaml            # LAMMPS 运行参数模板
+│   ├── mass_list.yaml                # 原子质量表
+│   └── mapping/                      # CG 映射配置模板
 │
 ├── docs/                             # 文档和示例
 │   ├── bond-modes.md                 # 建键模式 (bond/react vs bond/create)
@@ -163,13 +190,16 @@ LmpPy/
 │   ├── output-files.md               # 输出文件格式说明
 │   ├── modules.md                    # 模块 API 参考
 │   ├── cli-scripts.md                # CLI 脚本使用指南
+│   ├── gro_format.md                 # GRO 格式说明
+│   ├── lammps_data_format.md         # LAMMPS data 格式说明
+│   ├── reaction_locator_fix.md       # ReactionLocator 修复记录
 │   └── examples/                     # 示例配置文件
 │       ├── bond_react/               # bond/react 模式配置示例
 │       ├── bond_create/              # bond/create 模式配置示例
-│       ├── reactions/                # 反应模板示例
-│       └── ... (其他示例文件)
+│       └── reactions/                # 反应模板示例
 │
-└── README.md                         # 本文档
+├── README.md                         # 英文 README
+└── README.zh-CN.md                   # 中文 README（本文档）
 ```
 
 ---
@@ -179,26 +209,37 @@ LmpPy/
 ### 必需依赖
 
 ```bash
-# Python >= 3.8
-pip install numpy pandas pyyaml scipy
+# Python >= 3.9
+# numpy / pandas / pyyaml 由 core/ 与 utils/ 在导入期无条件加载
+pip install numpy pandas pyyaml
 ```
 
 ### 可选依赖
 
 ```bash
-# Numba JIT 加速（强烈推荐）
+# Numba JIT 加速（强烈推荐；用于 find_molecules 与 unwrap_coords）
 pip install numba
-
-# LAMMPS Python 接口（运行模拟必需，需编译 LAMMPS 并启用 PYTHON 包）
 
 # MPI 支持（并行运行必需）
 pip install mpi4py
+
+# 后处理分析与绘图（output_analysis/、scripts/）
+pip install scipy matplotlib seaborn tqdm
+
+# GROMACS 转换与 IBI 势函数拟合（tools/）
+pip install MDAnalysis scikit-optimize
+
+# LAMMPS Python 接口（运行模拟必需，需编译 LAMMPS 并启用 PYTHON 包）
 ```
+
+`numba`、`mpi4py` 与 LAMMPS Python 接口均在 `try`/`except` 中导入：缺失时 LmpPy 会回退到纯 Python 实现，或打印警告并以测试模式运行，因此最小环境下包仍可正常导入。
+
+上述分组在 `pyproject.toml` 中同时声明为 extras —— `[mpi]`、`[analysis]`、`[tools]`、`[dev]`。
 
 ### 完整安装
 
 ```bash
-pip install numpy pandas pyyaml scipy numba mpi4py
+pip install numpy pandas pyyaml numba mpi4py scipy matplotlib seaborn tqdm
 ```
 
 ### LAMMPS 编译
@@ -235,10 +276,17 @@ my_system/
 ```
 
 **文档导航**：
-- [docs/examples/bond_react/](docs/examples/bond_react/) — bond/react 完整配置示例
-- [docs/examples/bond_create/](docs/examples/bond_create/) — bond/create 完整配置示例
+- `docs/examples/` — 可直接运行的 mini_test 体系（配置 + 映射 + data + 反应模板齐备）
+- [docs/examples/bond_react/](docs/examples/bond_react/) — bond/react 字段参考（仅 YAML 骨架，需自备 mapping/data/反应文件）
+- [docs/examples/bond_create/](docs/examples/bond_create/) — bond/create 字段参考（仅 YAML 骨架，需自备 mapping/data 文件）
 - [docs/configuration.md](docs/configuration.md) — 配置参数字段详解
 - [docs/cg-mapping.md](docs/cg-mapping.md) — CG 映射格式说明
+
+若全原子体系已有 GROMACS 形式，`system.data` 可不必手写，直接由 GAFF 的 `top` + `gro` 生成：
+
+```bash
+python -m LmpPy.scripts.gmx2lmp_data --top system.top --gro system.gro -o my_system/system.data
+```
 
 ### 2. 运行模拟
 
@@ -493,14 +541,18 @@ from LmpPy.core import (
     # CG 拓扑
     CGTopology, derive_cg_topology_from_bonds,
     # v2.6+ 新增
-    BondCreatePair, BondCreateConfig,
+    BondCreateConfig,
     get_reaction_mode, generate_fix_bond_create, generate_fix_bond_react,
     update_cg_mapping_create,
-    CGReactionSignature,
-    load_template_signatures, identify_reaction,
-    # 冒烟测试
-    SmokeValidator, SmokeTestReport, SmokeTestHarness,
 )
+
+# 以下符号未在 core/__init__.py 中重导出，需从子模块导入
+from LmpPy.core.reaction_commands import BondCreatePair
+from LmpPy.core.cg_reaction_identifier import (
+    CGReactionSignature, load_template_signatures, identify_reaction,
+)
+from LmpPy.core.smoke_test_harness import SmokeTestHarness
+from LmpPy.core.smoke_validator import SmokeValidator, SmokeTestReport
 ```
 
 ### 使用示例
@@ -548,18 +600,28 @@ from LmpPy.tools.aa2cg import (
 )
 ```
 
-### ibm_potential — IBM 势能计算
+### ibm_potential — IBM / IBI 势能计算
 
-从 CG 轨迹完成分布计算、玻尔兹曼反演到 LAMMPS table 文件生成的全流程。
+从 CG 轨迹完成分布计算、玻尔兹曼反演到 LAMMPS table 文件生成的全流程，并提供表格势函数的解析、拟合与绘图。
 
 ```python
 from LmpPy.tools.ibm_potential import (
+    # 分布 → 势能 → table
     load_ibm_config,
     calculate_bond_distribution,
     calculate_bond_potential,
     create_lammps_table_files,
+    # 表格势函数解析 / 拟合 / 绘图
+    read_tabulated_table,
+    fit_table,
+    fit_lj,
+    fit_bond_harmonic,
+    plot_single_table,
+    plot_all_tables,
 )
 ```
+
+输入轨迹同时支持 GROMACS 轨迹（`gromacs_loader.py`）与 pickle 格式 CG 轨迹（`pickle_loader.py`）。
 
 ### smooth_utils — 分布平滑工具包
 
@@ -578,7 +640,7 @@ from LmpPy.tools.smooth_utils import (
 
 ## 后处理分析
 
-`output_analysis/` 子包（v2.6+）提供模拟结果的后处理统计分析功能，包括链长分布、反应距离分布、反应统计和 JS 散度分析。
+`output_analysis/` 子包（v2.6+）提供模拟结果的后处理统计分析功能：链长分布、反应距离分布、反应统计、JS 散度，以及共聚竞聚率。
 
 ### CLI 入口
 
@@ -592,12 +654,21 @@ python -m LmpPy.output_analysis distance <input_dir> [--bins N]
 # 反应统计
 python -m LmpPy.output_analysis reaction-stats <input_dir>
 
+# 从 CG 模拟输出估计竞聚率 r1/r2
+python -m LmpPy.output_analysis reactivity-ratio <input_dir>
+
+# 从 AA bond/react 输出估计竞聚率 r1/r2
+# （--bond-react-check-step 须与 lammps_params.yaml 中 steps.bond_react_check 一致）
+python -m LmpPy.output_analysis reactivity-ratio-aa <aa_dir> [--bond-react-check-step N]
+
 # 执行所有分析
 python -m LmpPy.output_analysis all <input_dir>
 
 # 从 npz 重建反应详情
 python -m LmpPy.output_analysis rebuild <npz_path> -o <csv_path>
 ```
+
+两条竞聚率命令均由逐周期反应计数估计单体竞聚率 r1/r2，采用分块 bootstrap 给出置信区间，并输出随转化率演化的结果。二者的区别仅在数据来源：`reactivity-ratio` 读取 CG 模拟输出，`reactivity-ratio-aa` 从 AA 的 `reaction_frames.npz` 配合轨迹重建计数。
 
 ### Python API
 
@@ -620,17 +691,36 @@ stats = analyze_reaction_stats("output/")
 
 LmpPy 提供一系列 CLI 脚本，可通过 `python -m LmpPy.scripts.<name>` 方式运行：
 
+**体系准备**
+
 | 脚本 | 用途 | 详细文档 |
 |------|------|----------|
+| `gmx2lmp_data.py` | GROMACS `top`+`gro`（GAFF）→ LAMMPS data 文件 | [docs/cli-scripts.md#15-gmx2lmp_datapy](docs/cli-scripts.md#15-gmx2lmp_datapy) |
+| `build_cg_config.py` | 生成 CG 配置 | [docs/cli-scripts.md#2-build_cg_configpy](docs/cli-scripts.md#2-build_cg_configpy) |
 | `build_cg_system.py` | 构建 CG 体系 LAMMPS data 文件 | [docs/cli-scripts.md#3-build_cg_systempy](docs/cli-scripts.md#3-build_cg_systempy) |
 | `convert_aa2cg.py` | AA→CG 转换（data 文件或轨迹） | [docs/cli-scripts.md#7-convert_aa2cgpy](docs/cli-scripts.md#7-convert_aa2cgpy) |
-| `calc_dist.py` | 分布计算（VOTCA 格式） | [docs/cli-scripts.md#4-calc_distpy](docs/cli-scripts.md#4-calc_distpy) |
-| `calc_ibm_potential.py` | IBM 势能计算全流程 | [docs/cli-scripts.md#5-calc_ibm_potentialpy](docs/cli-scripts.md#5-calc_ibm_potentialpy) |
+| `generate_initial_mapping.py` | 生成初始 CG 映射 | [docs/cli-scripts.md#9-generate_initial_mappingpy](docs/cli-scripts.md#9-generate_initial_mappingpy) |
+| `yaml2csv_mapping.py` | YAML→CSV 映射转换 | [docs/cli-scripts.md#14-yaml2csv_mappingpy](docs/cli-scripts.md#14-yaml2csv_mappingpy) |
+| `data2gro.py` | LAMMPS data 转 GRO | [docs/cli-scripts.md#8-data2gropy](docs/cli-scripts.md#8-data2gropy) |
+
+**分布与势函数**
+
+| 脚本 | 用途 | 详细文档 |
+|------|------|----------|
+| `calc_dist.py` | 分布计算（VOTCA 格式，`--skip-existing` 支持增量重跑） | [docs/cli-scripts.md#4-calc_distpy](docs/cli-scripts.md#4-calc_distpy) |
 | `smooth_distribution.py` | 分布平滑 | [docs/cli-scripts.md#11-smooth_distributionpy](docs/cli-scripts.md#11-smooth_distributionpy) |
 | `plot_dist.py` | 分布绘图 | [docs/cli-scripts.md#10-plot_distpy](docs/cli-scripts.md#10-plot_distpy) |
-| `yaml2csv_mapping.py` | YAML→CSV 映射转换 | [docs/cli-scripts.md#14-yaml2csv_mappingpy](docs/cli-scripts.md#14-yaml2csv_mappingpy) |
-| `generate_initial_mapping.py` | 生成初始 CG 映射 | [docs/cli-scripts.md#9-generate_initial_mappingpy](docs/cli-scripts.md#9-generate_initial_mappingpy) |
-| `data2gro.py` | LAMMPS data 转 GRO | [docs/cli-scripts.md#8-data2gropy](docs/cli-scripts.md#8-data2gropy) |
+| `calc_ibm_potential.py` | IBM 势能计算全流程 | [docs/cli-scripts.md#5-calc_ibm_potentialpy](docs/cli-scripts.md#5-calc_ibm_potentialpy) |
+| `calc_ibm_potential_from_dist.py` | 从已有分布计算 IBM 势能 | [docs/cli-scripts.md#6-calc_ibm_potential_from_distpy](docs/cli-scripts.md#6-calc_ibm_potential_from_distpy) |
+| `fit_tabulated.py` | 表格势函数解析拟合（LJ well/direct、harmonic、cosine） | — |
+| `mix_cross_tabulated.py` | 两个表格势函数交叉混合为异核势 | — |
+| `plot_tabulated.py` | 表格势函数与其拟合结果绘图 | — |
+
+**工具**
+
+| 脚本 | 用途 | 详细文档 |
+|------|------|----------|
+| `extract_reaction_frame.py` | 提取单个反应帧用于可视化 | — |
 | `validate_config.py` | 配置验证 | [docs/cli-scripts.md#13-validate_configpy](docs/cli-scripts.md#13-validate_configpy) |
 | `test_smoke_run.py` | 冒烟测试独立运行 | [docs/cli-scripts.md#12-test_smoke_runpy](docs/cli-scripts.md#12-test_smoke_runpy) |
 
@@ -721,7 +811,7 @@ if report is not None:
 
 **解决**: 增大 `cutoff` 值，检查模板与实际分子的匹配，延长模拟时间。
 
-### Q4: Tab character YAML parse error
+### Q4: YAML 解析报 Tab 字符错误
 
 **原因**: YAML 文件包含 Tab 字符。
 
@@ -747,6 +837,12 @@ sed -i 's/\t/  /g' *.yaml
 **原因**: 两种模式互斥，不能同时启用。
 
 **解决**: 确保 `bond_create.enabled=true` 时，`bond_react.reactions` 不存在或为空列表；反之亦然。
+
+### Q8: reactivity-ratio-aa 报 bond_react_check_step 不匹配
+
+**原因**: AA 路径以 `时间步 - bond_react_check_step` 定位反应前帧，该参数默认为 1；若 `steps.bond_react_check` 配置得更大，将找不到对应帧。
+
+**解决**: 用 `--bond-react-check-step` 传入与 `lammps_params.yaml` 中一致的值。程序会显式报错，不会静默取错帧。
 
 ---
 
@@ -831,6 +927,41 @@ run_refactored.py
 ---
 
 ## 更新日志
+
+### v2.7 (2026-09-11)
+
+- **新增 GROMACS → LAMMPS 转换链路**
+  - `scripts/gmx2lmp_data.py`: 将 GAFF 的 `top` + `gro` 转换为 LAMMPS `data` 文件（real 单位，`atom_style full`）
+  - 多分子展开采用统一偏移基准，补齐 bonded 系数段，增加 atomtypes 重复校验
+  - `test_gmx2lmp_data.py`: 端到端交叉验证测试套件
+  - 文档: `docs/cli-scripts.md#15`
+
+- **新增表格势函数工具链**
+  - `tools/ibm_potential/tabulated_potential.py`: VOTCA/LAMMPS table 解析、类型识别、解析拟合（LJ 12-6、harmonic bond、cosine/harmonic angle）与绘图
+  - `scripts/fit_tabulated.py`: 拟合 CLI，LJ 支持 `well` 与 `direct` 两种取参策略
+  - `scripts/mix_cross_tabulated.py`: 两个表格势函数交叉混合为异核势
+  - `scripts/plot_tabulated.py`: 表格势函数绘图 CLI
+
+- **新增 AA 数据竞聚率分析**
+  - `output_analysis/reactivity_ratio.py`: `collect_per_cycle_counts_aa()` 从 `reaction_frames.npz` 配合轨迹重建逐周期计数，反应前帧按 `bond_react_check_step` 回溯
+  - `analyze_reactivity_ratio_aa()` 复用既有估计逻辑，新增转化率演化输出与详细报告
+  - CLI 新增子命令: `reactivity-ratio`、`reactivity-ratio-aa`
+  - `test_reactivity_ratio.py`: 覆盖 CG 与 AA 两条路径的测试套件
+
+- **分布计算支持增量跳过**
+  - `scripts/calc_dist.py`: `run_pipeline` 补齐 `--skip-existing`，与两个 pickle 管线对齐
+
+- **正确性修复**
+  - `tools/ibm_potential/{gromacs_loader,pickle_loader}.py`: 二面角分布的 `y` 只除了 `|bc|` 而 `x` 除了 `|n1||n2|`，等效把 `tan(phi)` 放大 `|n1||n2|` 倍（CG 键长下可达数百），分布被系统性压向 ±90°
+  - `scripts/convert_aa2cg.py`: CG `data` 文件中写入的是 AA 原子质量而非 CG bead 质量；单珠映射下无碍，多珠体系会导致轻珠飞出、IBI 不稳定
+  - `tools/aa2cg/data_converter.py`: 头部声明的是 bead 类型**个数**而非**最大类型号**，全局类型编号有空缺的体系会因此报错
+  - `core/cg_reaction_identifier.py`: 模板签名支持 interior `bead_type` 为列表（如 `[1, 2]`），按每个候选类型各生成一条签名
+
+- **打包**
+  - `pyproject.toml`: 补上遗漏的 `pandas` 依赖，修正 `readme` 与包发现路径，新增 `analysis` / `tools` extras，修正 `config/mapping/` 的 `package-data`
+
+- **文档**
+  - `docs/configuration.md`: 补充 AA-AM 自由基共聚推荐生产配置（10480 原子 GAFF 体系实测）
 
 ### v2.6 (2026-06-22)
 

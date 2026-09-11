@@ -1,12 +1,14 @@
-# LmpPy - LAMMPS Bond/React Post-processing Framework v2.6
+# LmpPy - LAMMPS Bond/React Post-Processing Framework v2.7
 
 > English | [中文](README.zh-CN.md)
 
-> Version: 2.6
-> Date: 2026-06-22
+> Version: 2.7
+> Date: 2026-09-11
 > Language: English
 
-LmpPy is a post-processing framework for LAMMPS `bond/react` and `bond/create` simulations. It converts all-atom (AA) simulations into coarse-grained (CG) trajectories in real time, detects and records chemical reaction events, automatically updates the CG mapping and topology after reactions, and provides a rich set of post-processing analysis tools.
+LmpPy is a post-processing framework for LAMMPS `bond/react` and `bond/create` simulations of polymer reaction systems. It converts all-atom (AA) simulations into coarse-grained (CG) trajectories in real time, detects and records bond formation and breaking events, automatically updates the CG mapping and topology after reactions, and provides a rich set of post-processing analysis tools.
+
+The framework targets multiscale modelling of polymer materials: radical copolymerization, epoxy ring-opening, polyurethane step-growth, and crosslinked networks. Beyond trajectory conversion, it supplies the CG distributions needed for iterative Boltzmann inversion (IBI) force-field development, and the per-event data used to fit machine-learning models that replace `bond/react` at the CG level.
 
 ---
 
@@ -38,8 +40,8 @@ LmpPy is a post-processing framework for LAMMPS `bond/react` and `bond/create` s
 
 ### Core Features
 
-1. **CG trajectory generation** — converts all-atom trajectories into coarse-grained trajectories in real time
-2. **Reaction monitoring** — detects chemical reaction events and counts reactions (supports both bond/react and bond/create modes)
+1. **CG trajectory generation** — converts all-atom trajectories of reacting polymer systems into coarse-grained trajectories in real time
+2. **Reaction monitoring** — detects bond formation and breaking events and counts them per cycle (supports both bond/react and bond/create modes), providing the raw data for monomer conversion and reactivity-ratio statistics
 3. **CG mapping update** — automatically updates the atom-to-bead mapping after reactions
 4. **CG topology derivation** — derives coarse-grained bonds, angles, and dihedrals from bond connectivity
 5. **Restart / continuation** — supports continuing a calculation from the final state of a previous run
@@ -48,8 +50,10 @@ LmpPy is a post-processing framework for LAMMPS `bond/react` and `bond/create` s
 
 | Feature | Description |
 |---------|-------------|
-| **Multi-system support** | Define different chemical reaction systems via configuration files (epoxy resins, polyurethanes, crosslinked networks, etc.) |
+| **Multi-system support** | Define different polymer reaction systems via configuration files (radical copolymerization, epoxy ring-opening, polyurethane step-growth, crosslinked networks, etc.) |
 | **Dual bond-creation modes** | bond/react template matching + bond/create distance criteria, covering different scenarios |
+| **Force-field development** | IBI (iterative Boltzmann inversion) pipeline from CG distributions to tabulated potentials, including cross-mixing for unlike bead pairs |
+| **GROMACS interoperability** | Convert GROMACS `top` + `gro` (GAFF) systems into LAMMPS `data` files, so existing AA force fields can be reused directly |
 | **Configuration driven** | All parameters are defined in YAML configuration files; no code changes required |
 | **High performance** | Vectorized/Numba-optimized key computations; some operations accelerated 30–300x |
 | **MPI parallelism** | Supports multi-process parallel execution |
@@ -67,11 +71,13 @@ LmpPy is a post-processing framework for LAMMPS `bond/react` and `bond/create` s
 
 ### Data Flow (Three-Repository Pipeline)
 
-LmpPy is the first stage of a larger data processing pipeline, working together with the following repositories:
+LmpPy is the first stage of a larger multiscale pipeline, working together with the following repositories:
 
 ```
 LmpPy (CG post-processing) → SOAP_calc_and_Feature_select (SOAP calculation + feature selection) → mlcgsim (XGBoost driven)
 ```
+
+The AA stage produces reaction events and CG mappings; SOAP descriptors are computed around the reacting bonds and screened down to a compact feature set; an XGBoost classifier trained on those features then drives CG simulations without invoking `bond/react` at runtime.
 
 See [docs/workflow.md](docs/workflow.md) for the full data flow description.
 
@@ -83,7 +89,10 @@ See [docs/workflow.md](docs/workflow.md) for the full data flow description.
 LmpPy/
 ├── __init__.py                       # Package entry point
 ├── run_refactored.py                 # Main entry script (LAMMPSReactionRunner)
+├── pyproject.toml                    # Package metadata and dependency declaration
 ├── test_integration.py               # Integration tests
+├── test_gmx2lmp_data.py              # gmx2lmp_data test suite
+├── test_reactivity_ratio.py          # Reactivity-ratio statistics test suite
 │
 ├── core/                             # Core functionality modules
 │   ├── __init__.py                   # Exports all core classes and functions
@@ -106,10 +115,12 @@ LmpPy/
 │
 ├── output_analysis/                  # Post-processing analysis subpackage (v2.6+)
 │   ├── __init__.py
+│   ├── __main__.py                   # `python -m LmpPy.output_analysis` entry point
 │   ├── cli.py                        # Unified CLI entry point
 │   ├── chain_length.py               # Chain length distribution analysis
 │   ├── distance.py                   # Reaction distance distribution analysis
 │   ├── reaction_stats.py             # Reaction statistics
+│   ├── reactivity_ratio.py           # Reactivity ratio (r1/r2) estimation, CG and AA paths
 │   ├── js_divergence.py              # JS divergence calculation
 │   ├── loader.py                     # Data loading utilities
 │   ├── theory.py                     # Theoretical distribution models (Schulz-Zimm, Poisson, Log-normal)
@@ -129,32 +140,47 @@ LmpPy/
 │   │   ├── data_converter.py         # LAMMPS data conversion
 │   │   ├── trj_converter.py          # Trajectory conversion
 │   │   └── mapping_utils.py          # Mapping utility functions
-│   ├── ibm_potential/                # IBM potential calculation
+│   ├── ibm_potential/                # IBM / IBI potential calculation
 │   │   ├── config.py                 # Configuration loading
 │   │   ├── distribution.py           # Distribution calculation
 │   │   ├── boltzmann.py              # Boltzmann inversion
-│   │   └── lammps_table.py           # LAMMPS table generation
+│   │   ├── lammps_table.py           # LAMMPS table generation
+│   │   ├── tabulated_potential.py    # Tabulated potential parsing / fitting / plotting
+│   │   ├── gromacs_loader.py         # GROMACS trajectory loading
+│   │   ├── pickle_loader.py          # Pickled CG trajectory loading
+│   │   ├── dist_config.py            # Distribution plot configuration
+│   │   └── dist_plot.py              # Distribution plotting
 │   └── smooth_utils/                 # Distribution smoothing toolkit
 │       ├── core.py / cli.py / constants.py / io.py
 │       ├── preprocess.py / peaks.py / zones.py / quality.py
 │       ├── optimize.py / angle_dihedral.py
-│       ├── report.py / dist_config.py / dist_plot.py
+│       └── report.py
 │
 ├── scripts/                          # CLI scripts
+│   ├── build_cg_config.py            # Generate CG configuration
 │   ├── build_cg_system.py            # Build CG system LAMMPS data file
+│   ├── gmx2lmp_data.py               # GROMACS top+gro → LAMMPS data conversion
 │   ├── convert_aa2cg.py              # AA→CG conversion CLI
 │   ├── generate_initial_mapping.py   # Generate initial CG mapping
-│   ├── smooth_distribution.py        # Distribution smoothing CLI
-│   ├── calc_ibm_potential.py         # IBM potential calculation CLI
-│   ├── calc_dist.py                  # Distribution calculation CLI
-│   ├── plot_dist.py                  # Distribution plotting CLI
 │   ├── yaml2csv_mapping.py           # YAML→CSV mapping conversion
 │   ├── data2gro.py                   # LAMMPS data to GRO conversion
+│   ├── smooth_distribution.py        # Distribution smoothing CLI
+│   ├── calc_dist.py                  # Distribution calculation CLI
+│   ├── plot_dist.py                  # Distribution plotting CLI
+│   ├── calc_ibm_potential.py         # IBM potential calculation CLI
+│   ├── calc_ibm_potential_from_dist.py # IBM potential from precomputed distributions
+│   ├── fit_tabulated.py              # Fit tabulated potentials to analytic forms
+│   ├── mix_cross_tabulated.py        # Cross-mix tabulated potentials for unlike pairs
+│   ├── plot_tabulated.py             # Plot tabulated potentials
+│   ├── extract_reaction_frame.py     # Extract a single reaction frame for visualization
+│   ├── validate_config.py            # Configuration validation
 │   └── test_smoke_run.py             # Standalone smoke test runner script
 │
 ├── config/                           # Configuration file templates
-│   ├── mapping/                      # CG mapping configuration templates
-│   └── reactions/                    # Reaction template configurations
+│   ├── system.yaml                   # System configuration template
+│   ├── lammps_params.yaml            # LAMMPS run parameter template
+│   ├── mass_list.yaml                # Atom mass list
+│   └── mapping/                      # CG mapping configuration templates
 │
 ├── docs/                             # Documentation and examples
 │   ├── bond-modes.md                 # Bond-creation modes (bond/react vs bond/create)
@@ -164,13 +190,16 @@ LmpPy/
 │   ├── output-files.md               # Output file format description
 │   ├── modules.md                    # Module API reference
 │   ├── cli-scripts.md                # CLI scripts usage guide
+│   ├── gro_format.md                 # GRO format notes
+│   ├── lammps_data_format.md         # LAMMPS data format notes
+│   ├── reaction_locator_fix.md       # ReactionLocator fix notes
 │   └── examples/                     # Example configuration files
 │       ├── bond_react/               # bond/react mode configuration example
 │       ├── bond_create/              # bond/create mode configuration example
-│       ├── reactions/                # Reaction template examples
-│       └── ... (other example files)
+│       └── reactions/                # Reaction template examples
 │
-└── README.md                         # This document
+├── README.md                         # English README (this document)
+└── README.zh-CN.md                   # Chinese README
 ```
 
 ---
@@ -180,26 +209,38 @@ LmpPy/
 ### Required Dependencies
 
 ```bash
-# Python >= 3.8
-pip install numpy pandas pyyaml scipy
+# Python >= 3.9
+# numpy / pandas / pyyaml are imported unconditionally by core/ and utils/
+pip install numpy pandas pyyaml
 ```
 
 ### Optional Dependencies
 
 ```bash
-# Numba JIT acceleration (strongly recommended)
+# Numba JIT acceleration (strongly recommended; used by find_molecules and unwrap_coords)
 pip install numba
-
-# LAMMPS Python interface (required for running simulations; requires compiling LAMMPS with the PYTHON package enabled)
 
 # MPI support (required for parallel execution)
 pip install mpi4py
+
+# Post-processing analysis and plotting (output_analysis/, scripts/)
+pip install scipy matplotlib seaborn tqdm
+
+# GROMACS conversion and IBI potential fitting (tools/)
+pip install MDAnalysis scikit-optimize
+
+# LAMMPS Python interface (required for running simulations; requires compiling
+# LAMMPS with the PYTHON package enabled)
 ```
+
+`numba`, `mpi4py` and the LAMMPS Python interface are all imported inside `try`/`except` blocks: if they are missing, LmpPy falls back to pure-Python implementations or prints a warning and runs in test mode, so the package remains importable in a minimal environment.
+
+These groups are also declared as extras in `pyproject.toml` — `[mpi]`, `[analysis]`, `[tools]`, `[dev]`.
 
 ### Full Installation
 
 ```bash
-pip install numpy pandas pyyaml scipy numba mpi4py
+pip install numpy pandas pyyaml numba mpi4py scipy matplotlib seaborn tqdm
 ```
 
 ### Compiling LAMMPS
@@ -236,10 +277,19 @@ my_system/
 ```
 
 **Documentation navigation**:
-- [docs/examples/bond_react/](docs/examples/bond_react/) — Complete bond/react configuration example
-- [docs/examples/bond_create/](docs/examples/bond_create/) — Complete bond/create configuration example
+- `docs/examples/` — Runnable mini_test system (config + mapping + data + reaction templates)
+- [docs/examples/bond_react/](docs/examples/bond_react/) — bond/react field reference (YAML skeleton only; supply your own mapping/data/reaction files)
+- [docs/examples/bond_create/](docs/examples/bond_create/) — bond/create field reference (YAML skeleton only; supply your own mapping/data files)
 - [docs/configuration.md](docs/configuration.md) — Detailed configuration parameter fields
 - [docs/cg-mapping.md](docs/cg-mapping.md) — CG mapping format description
+
+> The detailed documents under `docs/` are written in Chinese, which is the framework's working language.
+
+If the all-atom system already exists in GROMACS form, `system.data` can be generated from a GAFF `top` + `gro` pair instead of being written by hand:
+
+```bash
+python -m LmpPy.scripts.gmx2lmp_data --top system.top --gro system.gro -o my_system/system.data
+```
 
 ### 2. Run the Simulation
 
@@ -494,14 +544,18 @@ from LmpPy.core import (
     # CG topology
     CGTopology, derive_cg_topology_from_bonds,
     # New in v2.6+
-    BondCreatePair, BondCreateConfig,
+    BondCreateConfig,
     get_reaction_mode, generate_fix_bond_create, generate_fix_bond_react,
     update_cg_mapping_create,
-    CGReactionSignature,
-    load_template_signatures, identify_reaction,
-    # Smoke test
-    SmokeValidator, SmokeTestReport, SmokeTestHarness,
 )
+
+# The symbols below are not re-exported by core/__init__.py
+from LmpPy.core.reaction_commands import BondCreatePair
+from LmpPy.core.cg_reaction_identifier import (
+    CGReactionSignature, load_template_signatures, identify_reaction,
+)
+from LmpPy.core.smoke_test_harness import SmokeTestHarness
+from LmpPy.core.smoke_validator import SmokeValidator, SmokeTestReport
 ```
 
 ### Usage Examples
@@ -549,18 +603,28 @@ from LmpPy.tools.aa2cg import (
 )
 ```
 
-### ibm_potential — IBM Potential Calculation
+### ibm_potential — IBM / IBI Potential Calculation
 
-Full pipeline from CG trajectories through distribution calculation and Boltzmann inversion to LAMMPS table file generation.
+Full pipeline from CG trajectories through distribution calculation and Boltzmann inversion to LAMMPS table file generation, plus parsing, fitting and plotting of the resulting tabulated potentials.
 
 ```python
 from LmpPy.tools.ibm_potential import (
+    # Distribution → potential → table
     load_ibm_config,
     calculate_bond_distribution,
     calculate_bond_potential,
     create_lammps_table_files,
+    # Tabulated potential parsing / fitting / plotting
+    read_tabulated_table,
+    fit_table,
+    fit_lj,
+    fit_bond_harmonic,
+    plot_single_table,
+    plot_all_tables,
 )
 ```
+
+Both GROMACS trajectories (`gromacs_loader.py`) and pickled CG trajectories (`pickle_loader.py`) are supported as input.
 
 ### smooth_utils — Distribution Smoothing Toolkit
 
@@ -579,7 +643,7 @@ from LmpPy.tools.smooth_utils import (
 
 ## Post-processing Analysis
 
-The `output_analysis/` subpackage (v2.6+) provides post-processing statistical analysis of simulation results, including chain length distribution, reaction distance distribution, reaction statistics, and JS divergence analysis.
+The `output_analysis/` subpackage (v2.6+) provides post-processing statistical analysis of simulation results: chain length distribution, reaction distance distribution, reaction statistics, JS divergence, and copolymer reactivity ratio.
 
 ### CLI Entry Point
 
@@ -593,12 +657,21 @@ python -m LmpPy.output_analysis distance <input_dir> [--bins N]
 # Reaction statistics
 python -m LmpPy.output_analysis reaction-stats <input_dir>
 
+# Reactivity ratio r1/r2 from CG simulation output
+python -m LmpPy.output_analysis reactivity-ratio <input_dir>
+
+# Reactivity ratio r1/r2 from AA bond/react output
+# (--bond-react-check-step must match steps.bond_react_check in lammps_params.yaml)
+python -m LmpPy.output_analysis reactivity-ratio-aa <aa_dir> [--bond-react-check-step N]
+
 # Run all analyses
 python -m LmpPy.output_analysis all <input_dir>
 
 # Rebuild reaction details from npz
 python -m LmpPy.output_analysis rebuild <npz_path> -o <csv_path>
 ```
+
+The two reactivity-ratio commands estimate the monomer reactivity ratios r1/r2 from per-cycle reaction counts, using block bootstrap for confidence intervals and reporting conversion-resolved evolution. They differ only in the data source: `reactivity-ratio` reads CG simulation output, while `reactivity-ratio-aa` reconstructs the counts from AA `reaction_frames.npz` plus the accompanying trajectory.
 
 ### Python API
 
@@ -621,17 +694,36 @@ stats = analyze_reaction_stats("output/")
 
 LmpPy provides a series of CLI scripts that can be run as `python -m LmpPy.scripts.<name>`:
 
+**System preparation**
+
 | Script | Purpose | Detailed Documentation |
 |--------|---------|------------------------|
+| `gmx2lmp_data.py` | GROMACS `top`+`gro` (GAFF) → LAMMPS data file | [docs/cli-scripts.md#15-gmx2lmp_datapy](docs/cli-scripts.md#15-gmx2lmp_datapy) |
+| `build_cg_config.py` | Generate CG configuration | [docs/cli-scripts.md#2-build_cg_configpy](docs/cli-scripts.md#2-build_cg_configpy) |
 | `build_cg_system.py` | Build CG system LAMMPS data file | [docs/cli-scripts.md#3-build_cg_systempy](docs/cli-scripts.md#3-build_cg_systempy) |
 | `convert_aa2cg.py` | AA→CG conversion (data file or trajectory) | [docs/cli-scripts.md#7-convert_aa2cgpy](docs/cli-scripts.md#7-convert_aa2cgpy) |
-| `calc_dist.py` | Distribution calculation (VOTCA format) | [docs/cli-scripts.md#4-calc_distpy](docs/cli-scripts.md#4-calc_distpy) |
-| `calc_ibm_potential.py` | IBM potential calculation full pipeline | [docs/cli-scripts.md#5-calc_ibm_potentialpy](docs/cli-scripts.md#5-calc_ibm_potentialpy) |
+| `generate_initial_mapping.py` | Generate initial CG mapping | [docs/cli-scripts.md#9-generate_initial_mappingpy](docs/cli-scripts.md#9-generate_initial_mappingpy) |
+| `yaml2csv_mapping.py` | YAML→CSV mapping conversion | [docs/cli-scripts.md#14-yaml2csv_mappingpy](docs/cli-scripts.md#14-yaml2csv_mappingpy) |
+| `data2gro.py` | LAMMPS data to GRO conversion | [docs/cli-scripts.md#8-data2gropy](docs/cli-scripts.md#8-data2gropy) |
+
+**Distributions and potentials**
+
+| Script | Purpose | Detailed Documentation |
+|--------|---------|------------------------|
+| `calc_dist.py` | Distribution calculation (VOTCA format, `--skip-existing` for incremental reruns) | [docs/cli-scripts.md#4-calc_distpy](docs/cli-scripts.md#4-calc_distpy) |
 | `smooth_distribution.py` | Distribution smoothing | [docs/cli-scripts.md#11-smooth_distributionpy](docs/cli-scripts.md#11-smooth_distributionpy) |
 | `plot_dist.py` | Distribution plotting | [docs/cli-scripts.md#10-plot_distpy](docs/cli-scripts.md#10-plot_distpy) |
-| `yaml2csv_mapping.py` | YAML→CSV mapping conversion | [docs/cli-scripts.md#14-yaml2csv_mappingpy](docs/cli-scripts.md#14-yaml2csv_mappingpy) |
-| `generate_initial_mapping.py` | Generate initial CG mapping | [docs/cli-scripts.md#9-generate_initial_mappingpy](docs/cli-scripts.md#9-generate_initial_mappingpy) |
-| `data2gro.py` | LAMMPS data to GRO conversion | [docs/cli-scripts.md#8-data2gropy](docs/cli-scripts.md#8-data2gropy) |
+| `calc_ibm_potential.py` | IBM potential calculation full pipeline | [docs/cli-scripts.md#5-calc_ibm_potentialpy](docs/cli-scripts.md#5-calc_ibm_potentialpy) |
+| `calc_ibm_potential_from_dist.py` | IBM potential from precomputed distributions | [docs/cli-scripts.md#6-calc_ibm_potential_from_distpy](docs/cli-scripts.md#6-calc_ibm_potential_from_distpy) |
+| `fit_tabulated.py` | Fit tabulated potentials to analytic forms (LJ well/direct, harmonic, cosine) | — |
+| `mix_cross_tabulated.py` | Cross-mix two tabulated potentials into an unlike-pair table | — |
+| `plot_tabulated.py` | Plot tabulated potentials and fits | — |
+
+**Utilities**
+
+| Script | Purpose | Detailed Documentation |
+|--------|---------|------------------------|
+| `extract_reaction_frame.py` | Extract a single reaction frame for visualization | — |
 | `validate_config.py` | Configuration validation | [docs/cli-scripts.md#13-validate_configpy](docs/cli-scripts.md#13-validate_configpy) |
 | `test_smoke_run.py` | Standalone smoke test runner | [docs/cli-scripts.md#12-test_smoke_runpy](docs/cli-scripts.md#12-test_smoke_runpy) |
 
@@ -670,6 +762,8 @@ python LmpPy/scripts/test_smoke_run.py my_system/ --loop-num 3 --keep-output
 ```
 
 ### Example Output
+
+The report itself is printed in Chinese (the framework's working language); the block below is verbatim console output:
 
 ```
 ============================================================
@@ -748,6 +842,12 @@ sed -i 's/\t/  /g' *.yaml
 **Cause**: The two modes are mutually exclusive and cannot be enabled at the same time.
 
 **Solution**: Ensure that when `bond_create.enabled=true`, `bond_react.reactions` does not exist or is an empty list; and vice versa.
+
+### Q8: reactivity-ratio-aa reports a bond_react_check_step mismatch
+
+**Cause**: The AA path locates the pre-reaction frame as `timestep - bond_react_check_step`. Its default is 1, so any configuration with a larger `steps.bond_react_check` will miss the frame.
+
+**Solution**: Pass `--bond-react-check-step` with the same value used in `lammps_params.yaml`. The command raises an error rather than silently reading the wrong frame.
 
 ---
 
@@ -832,6 +932,41 @@ run_refactored.py
 ---
 
 ## Changelog
+
+### v2.7 (2026-09-11)
+
+- **New GROMACS → LAMMPS conversion path**
+  - `scripts/gmx2lmp_data.py`: convert a GAFF `top` + `gro` pair into a LAMMPS `data` file (real units, `atom_style full`)
+  - Multi-molecule expansion with a unified offset basis, bonded coefficient sections, and atomtypes duplication checks
+  - `test_gmx2lmp_data.py`: end-to-end cross-validation suite
+  - Documentation: `docs/cli-scripts.md#15`
+
+- **New tabulated potential toolchain**
+  - `tools/ibm_potential/tabulated_potential.py`: VOTCA/LAMMPS table parsing, type detection, analytic fitting (LJ 12-6, harmonic bond, cosine/harmonic angle) and plotting
+  - `scripts/fit_tabulated.py`: fitting CLI, with `well` and `direct` parameterisation strategies for LJ
+  - `scripts/mix_cross_tabulated.py`: cross-mix two tables into an unlike-pair potential
+  - `scripts/plot_tabulated.py`: table plotting CLI
+
+- **New reactivity-ratio analysis for AA data**
+  - `output_analysis/reactivity_ratio.py`: `collect_per_cycle_counts_aa()` reconstructs per-cycle counts from `reaction_frames.npz` plus trajectory; the pre-reaction frame is traced back by `bond_react_check_step`
+  - `analyze_reactivity_ratio_aa()` reuses the existing estimator and adds conversion-evolution output and a detailed report
+  - New CLI subcommands: `reactivity-ratio`, `reactivity-ratio-aa`
+  - `test_reactivity_ratio.py`: test suite covering both CG and AA paths
+
+- **Incremental distribution calculation**
+  - `scripts/calc_dist.py`: `--skip-existing` now also supported in `run_pipeline`, matching the two pickle pipelines
+
+- **Correctness fixes**
+  - `tools/ibm_potential/{gromacs_loader,pickle_loader}.py`: the dihedral distribution divided `y` by `|bc|` while dividing `x` by `|n1||n2|`, inflating `tan(phi)` by `|n1||n2|` (up to hundreds at CG bond lengths) and collapsing the distribution onto ±90°
+  - `scripts/convert_aa2cg.py`: CG `data` files were written with AA atomic masses instead of CG bead masses; harmless for single-bead mappings but ejected light beads and destabilised IBI for multi-bead ones
+  - `tools/aa2cg/data_converter.py`: the header declared the *count* of bead types rather than the *maximum type number*, which broke systems with gaps in global type numbering
+  - `core/cg_reaction_identifier.py`: template signatures now expand a list-valued interior `bead_type` (e.g. `[1, 2]`) into one signature per candidate
+
+- **Packaging**
+  - `pyproject.toml`: added the missing `pandas` requirement, fixed the `readme` and package-discovery paths, added `analysis` / `tools` extras, and corrected `package-data` for `config/mapping/`
+
+- **Documentation**
+  - `docs/configuration.md`: recommended production configuration for AA-AM radical copolymerization, validated on a 10480-atom GAFF system
 
 ### v2.6 (2026-06-22)
 
