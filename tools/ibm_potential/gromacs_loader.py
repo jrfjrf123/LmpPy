@@ -587,7 +587,9 @@ def calculate_dihedral_distribution_vectorized(
     norm_n2 = np.linalg.norm(n2, axis=2) + 1e-10
     norm_bc = np.linalg.norm(bc, axis=2) + 1e-10
 
-    y = dot_m1n2 / norm_bc
+    # 2026-08-18 修复（与 pickle_loader 同源 bug）：atan2 的 y/x 必须同一量级，
+    # 原实现 y 未除 |n1||n2|，等效 tan(phi) 被放大 |n1||n2| 倍，分布被压向 ±90°
+    y = dot_m1n2 / (norm_bc * norm_n1 * norm_n2)
     x = dot_n1n2 / (norm_n1 * norm_n2)
 
     # 二面角（度）

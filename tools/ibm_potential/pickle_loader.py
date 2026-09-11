@@ -452,7 +452,11 @@ def calculate_dihedral_distribution_vectorized(
     norm_n2 = np.linalg.norm(n2, axis=2)
 
     # 数值稳定性
-    y = np.sum(m1 * n2, axis=2) / (norm_bc + 1e-10)
+    # 注意：atan2 的 y/x 必须同一量级（同除 |n1||n2|）。
+    # 2026-08-18 修复：原实现 y 只除了 |bc|（量级 |n1||n2|）而 x 除了 |n1||n2|，
+    # 等效把 tan(phi) 放大 |n1||n2| 倍，分布被系统性压向 ±90°
+    # （CG 键长下 |n1||n2| 可达数百，几乎全部样本塌缩到 ±90°）
+    y = np.sum(m1 * n2, axis=2) / (norm_bc * norm_n1 * norm_n2 + 1e-10)
     x = np.sum(n1 * n2, axis=2) / (norm_n1 * norm_n2 + 1e-10)
 
     dihedrals = np.degrees(np.arctan2(y, x))  # (n_frames, n_dihedrals)
