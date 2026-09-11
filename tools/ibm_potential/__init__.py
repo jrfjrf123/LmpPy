@@ -78,6 +78,30 @@ from .lammps_table import (
     create_reference_file
 )
 
+# Tabulated 势能表读取/绘图/拟合
+from .tabulated_potential import (
+    TabulatedPotential,
+    FitResult,
+    read_tabulated_table,
+    detect_kind,
+    extract_type_ids,
+    detect_angle_unit,
+    discover_tables,
+    lj_12_6,
+    harmonic_bond,
+    cos_angle,
+    harmonic_angle,
+    fit_lj,
+    fit_bond_harmonic,
+    fit_angle,
+    fit_table,
+    AxisLimits,
+    PlotLimits,
+    plot_single_table,
+    plot_all_tables,
+    plot_fit_comparison,
+)
+
 # 可选：绘图模块
 try:
     from .dist_plot import (
@@ -137,6 +161,28 @@ __all__ = [
     'read_potential_file',
     'create_lammps_table_files',
     'create_reference_file',
+
+    # Tabulated 势能表
+    'TabulatedPotential',
+    'FitResult',
+    'read_tabulated_table',
+    'detect_kind',
+    'extract_type_ids',
+    'detect_angle_unit',
+    'discover_tables',
+    'lj_12_6',
+    'harmonic_bond',
+    'cos_angle',
+    'harmonic_angle',
+    'fit_lj',
+    'fit_bond_harmonic',
+    'fit_angle',
+    'fit_table',
+    'AxisLimits',
+    'PlotLimits',
+    'plot_single_table',
+    'plot_all_tables',
+    'plot_fit_comparison',
 
     # 绘图（可选）
     'plot_single_distribution',
