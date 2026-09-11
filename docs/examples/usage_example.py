@@ -32,7 +32,8 @@ def example_basic_usage():
     print("=" * 60)
 
     # 1. 加载配置
-    config_dir = Path("config/")
+    # 相对于本文件定位 LmpPy/config/，避免依赖当前工作目录
+    config_dir = Path(__file__).resolve().parent.parent.parent / "config"
     loader = ConfigLoader(str(config_dir))
 
     system_config = loader.load_system_config()
@@ -57,28 +58,23 @@ def example_cg_conversion(cg_list, mass_list):
     print("=" * 60)
 
     # 创建模拟的原子坐标数据
-    n_atoms = 100
+    # 注意: CGCompareList.data 的第 3 列是 AA_id（1-based，可跨到体系总原子数），
+    # 因此模拟坐标的原子数必须 >= 映射中的最大 AA_id，不能写死。
+    n_atoms = int(cg_list.data[:, 3].max())
     atom_coords = np.zeros((n_atoms, 5), dtype=np.float64)
     atom_coords[:, 0] = np.arange(1, n_atoms + 1)  # ID
     atom_coords[:, 1] = np.random.randint(1, 5, n_atoms)  # type
     atom_coords[:, 2:5] = np.random.rand(n_atoms, 3) * 50  # coords
 
-    # 创建CG映射数据
-    cg_mapping_data = np.zeros((n_atoms, 2), dtype=np.int32)
-    for i in range(n_atoms):
-        bead_id = (i // 10) + 1
-        bead_type = bead_id
-        cg_mapping_data[i] = [bead_id, bead_type]
-
     # 使用转换器
     converter = CGConverter()
 
     # 第一次转换 (构建索引)
-    cg_coords = converter.convert(atom_coords, cg_list.data[:n_atoms], mass_list)
+    cg_coords = converter.convert(atom_coords, cg_list.data, mass_list)
     print(f"CG坐标形状: {cg_coords.shape}")
 
     # 第二次转换 (使用缓存)
-    cg_coords2 = converter.convert(atom_coords, cg_list.data[:n_atoms], mass_list)
+    cg_coords2 = converter.convert(atom_coords, cg_list.data, mass_list)
     print(f"缓存命中，结果一致: {np.allclose(cg_coords, cg_coords2)}")
 
 

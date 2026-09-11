@@ -48,7 +48,10 @@ Dihedrals
 ...
 ```
 
-### 示例: rxn1_pre.lammpstemplate
+### 格式示例（省略中间行，仅示意结构）
+
+> 下面的计数与内容为**格式示意**，不对应本仓库中的任何模板文件。
+> 可直接运行的实例见 `reactions/rxn1/rxn1_pre.lammpstemplate`（23 atoms / 21 bonds / 34 angles / 31 dihedrals）。
 
 ```
 34 atoms
@@ -181,10 +184,13 @@ distance 11 22 1.4 3.5
 
 ## 4. 完整示例
 
+> 本节为**示意性说明**，原子数等数值与仓库中的实际文件无关。
+> 可运行的真实实例见 `reactions/rxn1/`。
+
 ### 环氧开环反应
 
 **反应前模板** (`rxn1_pre.lammpstemplate`):
-- 34个原子
+- 34个原子（示意值；仓库实际文件为 23 个）
 - 包含环氧基团结构
 
 **反应后模板** (`rxn1_post.lammpstemplate`):

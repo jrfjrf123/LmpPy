@@ -1,9 +1,11 @@
 # CLI 脚本使用指南
 
-> 版本: 2.5
-> 更新: 2026-06-22
+> 版本: 2.7
+> 更新: 2026-09-11
 
 本文档列出 LmpPy 项目所有 CLI 脚本的用途、参数和使用示例。
+
+> 参数表以脚本 `--help` 输出为准；新增或修改参数后请同步更新本文件。
 
 ---
 
@@ -26,6 +28,10 @@
 | [validate_config.py](#13-validate_configpy) | 配置验证 |
 | [yaml2csv_mapping.py](#14-yaml2csv_mappingpy) | YAML 到 CSV 映射转换 |
 | [gmx2lmp_data.py](#15-gmx2lmp_datapy) | GROMACS top+gro 转 LAMMPS data |
+| [fit_tabulated.py](#16-fit_tabulatedpy) | tabulated 势能表拟合为解析势 |
+| [mix_cross_tabulated.py](#17-mix_cross_tabulatedpy) | 交叉混合生成异核势能表 |
+| [plot_tabulated.py](#18-plot_tabulatedpy) | tabulated 势能表绘图 |
+| [extract_reaction_frame.py](#19-extract_reaction_framepy) | 从 MD 输出抽取反应帧详情 |
 
 ---
 
@@ -125,7 +131,7 @@ for mol in config.molecules:
 | `--types SPEC` | 分子 bead 类型：`name:type1,type2,...` |
 | `--masses MAP` | 原子类型质量：`1:12.01,2:12.01,3:12.01` |
 | `--gro PATH` | GRO 文件路径（提供坐标和类型，可选） |
-| `-o PATH` | 输出 LAMMPS .data 文件路径（必需） |
+| `-o` / `--output PATH` | 输出 LAMMPS .data 文件路径（必需） |
 
 **使用示例**：
 
@@ -166,17 +172,27 @@ python -m LmpPy.scripts.build_cg_system \
 
 **参数**：
 
-| 参数 | 说明 |
-|------|------|
-| `--traj PATH` | CG 轨迹文件（`.pkl` 或 `.lammpstrj`） |
-| `--top-dir PATH` | 拓扑文件目录（包含 `cg_bonds.txt`, `cg_angles.txt` 等） |
-| `--output-dir PATH` | 输出目录（可选） |
-| `--tpr PATH` | GROMACS TPR 拓扑文件（GROMACS 模式） |
-| `--xtc PATH` | GROMACS XTC 轨迹文件（GROMACS 模式） |
-| `--trr PATH` | GROMACS TRR 轨迹文件（GROMACS 模式） |
-| `--stride N` | 帧间隔（跳帧），可选 |
-| `--parallel N` | 并行进程数，可选 |
-| `-q` / `--quiet` | 安静模式 |
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--traj PATH` | CG 轨迹文件（`.pkl` 或 `.lammpstrj`） | — |
+| `--tpr PATH` | GROMACS TPR 拓扑文件（GROMACS 模式） | — |
+| `--xtc` / `--trr PATH` | GROMACS XTC/TRR 轨迹文件（同一参数的别名） | — |
+| `--top-dir PATH` | 拓扑文件目录（含 `cg_bonds.txt`, `cg_angles.txt` 等） | — |
+| `--output-dir PATH` | 输出目录 | `./dist_output` |
+| `--stride N` | 帧间隔（跳帧） | 1 |
+| `--n-bins N` | 直方图 bins 数 | 100 |
+| `--unit {A,nm}` | 轨迹距离单位 | `A` |
+| `--bond-range MIN MAX` | 键距离范围（与轨迹单位一致） | 2.0 6.0 |
+| `--angle-range MIN MAX` | 角度范围（度） | 0 180 |
+| `--dihedral-range MIN MAX` | 二面角范围（度） | -180 180 |
+| `--calc-pairs` | 计算所有 bead type 对的距离分布（排除 1-2/1-3/1-4） | 关闭 |
+| `--pair-range MIN MAX` | Pair 距离范围 | 3.0 15.0 |
+| `--exclude-12` / `--exclude-13` / `--exclude-14` | 排除 1-2 / 1-3 / 1-4 对 | 关闭 |
+| `--n-jobs N` | 并行进程数（仅用于 RDF 计算） | 1（串行） |
+| `--skip-existing` | 跳过已存在的输出文件 | 关闭 |
+| `--vectorized` | 全向量化计算（仅对 `.pkl` 有效，快但费内存） | 关闭 |
+| `--ordered-bond-type` | 测试模式：区分键方向性，不合并 (t1,t2) 与 (t2,t1) | 关闭 |
+| `--norm-max` / `--norm-area` | 最大值归一化 / 面积归一化（互斥） | 关闭 |
 
 **输入文件格式**：
 
@@ -202,7 +218,13 @@ python -m LmpPy.scripts.calc_dist --traj cg_trajectory.lammpstrj --top-dir ./ --
 
 # GROMACS 格式
 python -m LmpPy.scripts.calc_dist --tpr topol.tpr --xtc traj.xtc --top-dir ./ --stride 10
-python -m LmpPy.scripts.calc_dist --tpr topol.tpr --trr traj.trr --stride 5 --parallel 4
+python -m LmpPy.scripts.calc_dist --tpr topol.tpr --trr traj.trr --stride 5 --unit nm
+
+# 计算 pair 分布并并行加速
+python -m LmpPy.scripts.calc_dist --traj traj.pkl --top-dir ./ --calc-pairs --n-jobs 8
+
+# 增量重跑：跳过已算好的分布文件
+python -m LmpPy.scripts.calc_dist --traj traj.pkl --top-dir ./ --skip-existing
 ```
 
 ---
@@ -270,11 +292,17 @@ output:
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `-d` / `--dist-dir` | 分布文件目录 | `smoothed_output/` |
+| `-d` / `--distribution-dir` | 分布文件目录 | `smoothed_output/` |
 | `-o` / `--output-dir` | 势能输出目录 | `potentials_output/` |
-| `-t` / `--temperature` | 温度（K） | 400.0 |
+| `-t` / `--temperature` | 温度（K） | 400.0（或从文件头提取） |
+| `-u` / `--units {kcal/mol,kJ/mol,eV}` | 能量单位 | `kcal/mol` |
 | `--lammps-tables` | 是否生成 LAMMPS table 文件 | 关闭 |
 | `--plot` | 是否生成势能图 | 关闭 |
+| `-c` / `--config` | YAML 配置文件路径 | — |
+| `--no-jacobian` | 禁用 Jacobian 校正 | 关闭 |
+| `--smooth-window N` | Savitzky-Golay 窗口大小 | 21 |
+| `--smooth-polyorder N` | Savitzky-Golay 多项式阶数 | 3 |
+| `--extrap-method {linear,exponential}` | 边界外推方法 | `linear` |
 | `-q` / `--quiet` | 安静模式 | 关闭 |
 
 **输入格式支持**：
@@ -323,23 +351,29 @@ python -m LmpPy.scripts.calc_ibm_potential_from_dist -d dist_output/ -t 400 --la
 
 | 参数 | 说明 |
 |------|------|
-| `--input PATH` | 输入 LAMMPS data 文件 |
-| `--mapping PATH` | CG 映射 CSV 文件 |
-| `-o PATH` | 输出 CG data 文件 |
-| `--bonds PATH` | CG 键文件（预计算拓扑） |
-| `--derive-topology` | 从 AA 键自动推导 CG 拓扑 |
+| `-i` / `--input PATH` | 输入 LAMMPS data 文件 |
+| `-m` / `--mapping PATH` | CG 映射 CSV 文件 |
+| `-o` / `--output PATH` | 输出 CG data 文件 |
+| `--bonds PATH` | CG 键文件（提供时优先，忽略 `--derive-topology`） |
+| `--angles PATH` | CG 角度文件 |
+| `--dihedrals PATH` | CG 二面角文件 |
+| `--derive-topology` | 从 AA 键自动推导 CG 拓扑（bonds/angles/dihedrals） |
 | `--output-cg-topology DIR` | 输出 CG 拓扑文件目录 |
-| `--type-mapping PATH` | YAML 类型映射文件 |
+| `--type-mapping PATH` | YAML 类型映射文件（仅 `--derive-topology` 下生效） |
 | `--xyz` | 同时输出 XYZ 格式 |
 
 ### gro 子命令参数
 
 | 参数 | 说明 |
 |------|------|
-| `--gro PATH` | GROMACS GRO 文件 |
-| `--tpr PATH` | GROMACS TPR 文件 |
-| `--mapping PATH` | CG 映射 CSV 文件 |
-| `-o PATH` | 输出 CG data 文件 |
+| `-g` / `--gro PATH` | GROMACS GRO 文件 |
+| `-t` / `--tpr PATH` | GROMACS TPR 文件 |
+| `-m` / `--mapping PATH` | CG 映射 CSV 文件 |
+| `-o` / `--output PATH` | 输出 CG data 文件 |
+| `--derive-topology` | 从 AA 键自动推导 CG 拓扑（bonds/angles/dihedrals） |
+| `--output-cg-topology DIR` | 输出 CG 拓扑文件目录 |
+| `--type-mapping PATH` | YAML 类型映射文件（仅 `--derive-topology` 下生效） |
+| `--xyz` | 输出 XYZ 文件（`AA_unwrap.xyz` / `CG.xyz`） |
 
 **使用示例**：
 
@@ -486,6 +520,11 @@ python -m LmpPy.scripts.plot_dist -d ./dist_output --combined-only
 | `-d` / `--directory` | 处理目录下所有分布文件 | — |
 | `-o` / `--output` | 输出目录 | `smoothed_output` |
 | `-T` / `--temperature` | 温度（K） | 400 |
+| `--input-dist-unit {A,nm}` | 输入距离单位 | `A` |
+| `--input-ang-unit {deg,rad}` | 输入角度单位 | `deg` |
+| `--output-dist-unit {A,nm}` | 输出距离单位 | `A` |
+| `--output-ang-unit {deg,rad}` | 输出角度单位 | `deg` |
+| `-t` / `--threshold` | 输出阈值，小于该值的 x 和 P 置 0 | `1e-8` |
 | `-q` / `--quiet` | 安静模式 | 关闭 |
 
 **支持的文件格式**：
@@ -599,7 +638,14 @@ python -m LmpPy.scripts.validate_config config/ --no-report && echo "验证通�
 
 ## 14. yaml2csv_mapping.py
 
-**用途**：将 YAML 格式的 CG 映射文件（site-types + config）转换为 CSV 格式。用于在体系运行前生成初始映射，或在体系运行后检查映射正确性。
+**用途**：将 YAML 格式的 CG 映射文件（site-types + config）转换为 CSV 格式。
+
+> **⚠️ `-s` 不接收平台的 `system.yaml`。** 脚本读的是 `system.names`（mapping 文件路径
+> 列表）与 `system.numbers`（对应 copies 数）（`scripts/yaml2csv_mapping.py:127-128`），
+> 而平台 `system.yaml` 用的是 `system.mapping_files: [{path, copies}]`。传入平台
+> `system.yaml` 会抛 `KeyError: 'names'`。**新体系请改用
+> `python -m LmpPy.scripts.generate_initial_mapping`（见 §9）**，它走 ConfigLoader，
+> 支持当前格式。
 
 **位置**：`LmpPy/scripts/yaml2csv_mapping.py`
 
@@ -607,22 +653,23 @@ python -m LmpPy.scripts.validate_config config/ --no-report && echo "验证通�
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `-s` / `--system-yaml` | system.yaml 文件路径 | 必需 |
+| `-s` / `--system-yaml` | **旧格式** system.yaml 路径（需含 `system.names`/`system.numbers`） | 必需 |
 | `-o` / `--output` | 输出 CSV 文件名 | `AtomId_BeadId_compare_list.csv` |
-| `--custom` | 使用硬编码的自定义 bead type 映射 | 关闭 |
+| `--custom-map FILE` | 从 YAML/JSON 文件加载自定义 bead type 映射 `{site_type_name: bead_type_id}` | — |
+| `--custom` | 使用硬编码的自定义 bead type 映射（EPR，向后兼容） | 关闭 |
 | `-q` / `--quiet` | 安静模式 | 关闭 |
 
 **使用示例**：
 
 ```bash
-# 基本用法（自动生成 bead type）
-python -m LmpPy.scripts.yaml2csv_mapping -s config/system.yaml -o mapping.csv
+# 基本用法（按 site 出现顺序自动连续编号）
+python -m LmpPy.scripts.yaml2csv_mapping -s legacy_system.yaml -o mapping.csv
 
-# 使用自定义 bead type 映射
-python -m LmpPy.scripts.yaml2csv_mapping -s config/system.yaml --custom -o custom_mapping.csv
+# 从文件加载自定义 bead type 映射（推荐）
+python -m LmpPy.scripts.yaml2csv_mapping -s legacy_system.yaml --custom-map bead_type_map.yaml
 
-# 安静模式
-python -m LmpPy.scripts.yaml2csv_mapping -s config/system.yaml -q
+# 使用内置硬编码映射（EPR，向后兼容）
+python -m LmpPy.scripts.yaml2csv_mapping -s legacy_system.yaml --custom -o custom_mapping.csv
 ```
 
 **输出列**：`bead_id, mol_id, bead_type, AA_id, mass`
@@ -673,6 +720,144 @@ python LmpPy/scripts/gmx2lmp_data.py --top system.top --gro conf.gro -o out.data
 - 不支持的 functype（2/3/5/10 等）报错退出；`[ pairs ]`/`[ constraints ]` 等段跳过并告警（1-4 缩放由输出文件头注释建议的 `special_bonds` 覆盖）
 
 输出文件头注释列出了所需的 `pair_style`/`bond_style` 等 LAMMPS 设置与 `special_bonds` 建议值，直接照抄到输入脚本即可。
+
+---
+
+## 16. fit_tabulated.py
+
+**用途**：把 LAMMPS/VOTCA tabulated 势能表拟合成解析势函数（LJ 12-6、harmonic bond、cosine/harmonic angle）。是 IBI 迭代中「从表格势反推解析形式」这一步。
+
+**位置**：`LmpPy/scripts/fit_tabulated.py`
+
+**参数**：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `files` | 输入势能表文件列表（位置参数，可多个） | — |
+| `-d` / `--directory` | 处理目录下所有势能表文件 | — |
+| `-o` / `--output` | 输出目录 | `./fit_output` |
+| `--energy-unit UNIT` | 能量单位标签（仅标注，不做换算） | `kcal/mol` |
+| `--angle-form {auto,cos,harmonic}` | angle 拟合形式 | `auto` |
+| `--u-cut U` | bond/angle 势阱区选择阈值，只拟合 `U-Umin <= u_cut` 的点 | 10.0 |
+| `--rmin-fit R` / `--rmax-fit R` | nonbonded 拟合区间端点（Å），指定后跳过区间探索 | — |
+| `--lj-method {well,direct,explore}` | nonbonded 取参方式 | `well` |
+| `--no-plot` | 不生成对比图 | 关闭 |
+| `--y-max Y` | nonbonded 对比图能量上限 | — |
+| `-q` / `--quiet` | 安静模式 | 关闭 |
+
+**`--lj-method` 三种策略**：
+
+- `well`（默认）：势阱特征取参，以壳层间势垒顶为零点（`eps = E_barr - E_well`，`sigma` 取壁上 `E = E_barr` 的过点，`cutoff = r_barr`）
+- `direct`：尾部基线归零后取 `U = 0` 第一个过零点与势阱深度
+- `explore`：最小二乘区间探索
+
+**使用示例**：
+
+```bash
+# 拟合目录下所有势能表
+python -m LmpPy.scripts.fit_tabulated -d ./mdrun -o ./fit_output
+
+# 拟合指定文件
+python -m LmpPy.scripts.fit_tabulated nb11.pot.table bond1.pot.table angle1.pot.table
+
+# 指定 nonbonded 拟合区间，跳过区间探索
+python -m LmpPy.scripts.fit_tabulated -d ./mdrun --rmin-fit 3.5 --rmax-fit 12.0
+```
+
+---
+
+## 17. mix_cross_tabulated.py
+
+**用途**：交叉混合两个 tabulated 势能表，生成异核（cross）势能表（如 `nb11` + `nb33` → `nb13`）。异核势无法从 CG 模拟直接测得，只能由同核对混合得到。
+
+**位置**：`LmpPy/scripts/mix_cross_tabulated.py`
+
+**参数**：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `table_a` / `table_b` | 两个输入势能表（位置参数） | 必需 |
+| `-o` / `--output` | 输出势能表路径 | 必需 |
+| `--n-grid N` | 公共网格点数 | `max(N_A, N_B) + 1` |
+| `--tail-frac X` | 尾部归零化占比 | 0.1 |
+| `--mix-mode {geometric,arithmetic}` | 能量组合方式 | `geometric` |
+| `--opposite-sign {force,sign_a}` | 异号区处理（仅 geometric 有效） | `force` |
+| `--dump-corrected DIR` | 同时输出修正后的输入表到 DIR | — |
+
+**混合规则**（`--mix-mode geometric`，工作区 `docs/cross-tabulation-mixing.md` v2.0 规范）：
+
+```
+sigma_mix = (sigma_A + sigma_B) / 2
+eps_mix   = sqrt(eps_A * eps_B)
+V*_mix    = sign(V*_A) * sqrt(|V*_A * V*_B|)
+```
+
+**使用示例**：
+
+```bash
+python -m LmpPy.scripts.mix_cross_tabulated nb11.pot.table nb33.pot.table -o nb13.pot.table
+python -m LmpPy.scripts.mix_cross_tabulated nb22.pot.table nb44.pot.table -o nb24.pot.table
+```
+
+---
+
+## 18. plot_tabulated.py
+
+**用途**：绘制 LAMMPS/VOTCA tabulated 势能表及其力曲线，用于人工检查势阱深度、零点与截断位置。
+
+**位置**：`LmpPy/scripts/plot_tabulated.py`
+
+**参数**：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `files` | 输入势能表文件列表（位置参数，可多个） | — |
+| `-d` / `--directory` | 处理目录下所有势能表文件 | — |
+| `-o` / `--output` | 输出目录 | `./plots` |
+| `--types {bond,angle,nonbonded,dihedral,all} [...]` | 势能类型 | `all` |
+| `--no-force` | 不绘制力曲线 | 关闭 |
+| `--energy-unit UNIT` | 能量单位标签（仅坐标轴标注） | `kcal/mol` |
+| `--y-max Y` | nonbonded 势绘图能量上限，放大势阱区域 | — |
+| `--xlim MIN MAX` / `--ylim MIN MAX` | 默认横/纵坐标范围（所有类型） | — |
+| `--xlim-nb` / `--ylim-nb`（全称 `--xlim-nonbonded` / `--ylim-nonbonded`） | nonbonded 势坐标范围 | — |
+| `--xlim-bond` / `--ylim-bond` / `--xlim-angle` / `--ylim-angle` / `--xlim-dihedral` / `--ylim-dihedral` | 按类型分别指定坐标范围 | — |
+| `-q` / `--quiet` | 安静模式 | 关闭 |
+
+**使用示例**：
+
+```bash
+# 处理目录下所有势能表
+python -m LmpPy.scripts.plot_tabulated -d ./fit_output
+
+# 只看 nonbonded 势阱区域
+python -m LmpPy.scripts.plot_tabulated -d ./fit_output --types nonbonded --y-max 5
+
+# 不画力曲线
+python -m LmpPy.scripts.plot_tabulated bond1.pot.table --no-force
+```
+
+---
+
+## 19. extract_reaction_frame.py
+
+**用途**：从 LmpPy 输出目录随机抽取一个反应帧，输出该帧的详细原子/键变化信息，便于用 VMD/OVITO 等做可视化检查。
+
+**位置**：`LmpPy/scripts/extract_reaction_frame.py`
+
+**参数**：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `md_dir` | 含 `cg_trajectory.lammpstrj` 和 `reaction_frames.npz` 的目录 | 必需 |
+| `--seed N` | 随机种子（用于可重复的随机选择） | — |
+| `--output-dir DIR` | 输出目录 | `md_dir` |
+| `--output-prefix PREFIX` | 输出文件前缀 | — |
+
+**使用示例**：
+
+```bash
+python -m LmpPy.scripts.extract_reaction_frame output/md1 --seed 42 --output-dir ./frame_dump
+```
 
 ---
 

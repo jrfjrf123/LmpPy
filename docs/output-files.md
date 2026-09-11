@@ -398,40 +398,69 @@ angle_type1: OK (MSE=0.00021)
 
 ## 四、后处理分析输出（output_analysis）
 
-由后处理分析脚本（位于 SOAP_calc_and_Feature_select 管线）生成，存储在独立的 `output_analysis/` 目录中。
+由 `LmpPy.output_analysis` 模块生成（直接读取上表的模拟输出目录）。所有文件**平铺**写入 `-o/--output-dir` 指定的目录，不分子目录：
 
-### 4.1 目录结构
-
-```
-output_analysis/
-├── chain_length/
-│   ├── chain_length_distribution.png  # 链长分布直方图
-│   └── chain_length_stats.txt         # 链长统计（均值、方差、分布）
-├── reaction_distance/
-│   ├── reaction_distance_distribution.png  # 反应距离分布图
-│   └── reaction_distance_stats.txt         # 反应距离统计
-└── js_divergence/
-    ├── js_divergence_analysis.png      # JS 散度可视化
-    └── js_divergence_report.txt        # JS 散度分析报告
+```bash
+python -m LmpPy.output_analysis all ./process1/ -o ./analysis/
 ```
 
-### 4.2 链长分布图
+### 4.1 输出文件
 
-- 基于 `reaction_num.txt` 和 `final_cg_compare_list.csv` 计算
-- 展示体系中所有聚合物的链长分布
-- 包含均值、标准差等统计信息
+| 文件 | 生成命令 | 说明 |
+|------|----------|------|
+| `chain_length_distribution.png` | `chain-length` | 链长分布直方图 + KDE 曲线 |
+| `distance_distribution.png` | `distance` | 各反应类型的反应距离分布图 |
+| `reaction_stats.png` | `reaction-stats` | 反应统计（类型占比饼图 + 每循环堆叠柱状图） |
+| `reaction_details.csv` | `all` / `distance` / `reaction-stats` | 反应事件明细表（约 15 MB） |
+| `reaction_counts.csv` | `reaction-stats` | 每循环各反应类型计数 |
+| `reactivity_ratio_summary.json` | `reactivity-ratio` | 竞聚率 r1/r2 双归一化估计 + bootstrap CI |
+| `r_vs_conversion.png` | `reactivity-ratio` | r(X) 轨迹 + 窗宽扫描 |
+| `composition_mayo_lewis.png` | `reactivity-ratio` | 组成法交叉验证 |
+| `channel_rates.png` | `reactivity-ratio` | 四通道细粒度事件率柱状图 |
+| `summary_dashboard.png` | `reactivity-ratio` | r1/r2 详细柱状图 + CI 误差棒 |
+| `window_estimates.csv` | `reactivity-ratio` | 各转化率窗口的估计值 |
 
-### 4.3 反应距离分布图
+### 4.2 输入依赖
+
+| 文件 | 用途 | 需要的子命令 |
+|------|------|--------------|
+| `final_frame.data` | 解析键拓扑，BFS 识别连通分子 → 链长 | `chain-length` |
+| `reaction_frames.npz` | 反应事件数据（键变化、坐标、CG 映射） | `distance`, `reaction-stats` |
+| `reaction_details.csv` | 反应事件表格（已存在则跳过 npz 重建） | `distance`, `reaction-stats` |
+
+`reaction_details.csv` 不存在时模块会从 `reaction_frames.npz` 自动重建；npz 可达 5–100 GB，重建采用两阶段流式读取并临时提取到 `/tmp`。
+
+### 4.3 链长分布图
+
+- 从 `final_frame.data` 解析键拓扑，通过 BFS 识别连通分子后统计链长
+- 可用 `--min-length` 过滤短链，`--theory-type`（Schulz-Zimm / Poisson / 对数正态）叠加理论曲线
+- `--js` 额外计算 JS 散度
+
+### 4.4 反应距离分布图
 
 - 基于 `reaction_frames.npz` 中的反应前后坐标计算
-- 展示反应发生时的原子间距离分布
-- 用于验证反应截断半径 `cutoff` 的合理性
+- 展示反应发生时的原子间距离分布，用于验证反应截断半径 `cutoff` 的合理性
+- `--ref-csv` 可叠加参考分布并做 KS 检验
 
-### 4.4 JS 散度分析
+### 4.5 反应统计图
 
-- Jensen-Shannon Divergence（JS 散度）分析
-- 对比不同模拟参数下的反应行为差异
-- 评估反应统计的可重复性
+- 饼图展示各反应类型占比；堆叠柱状图展示每循环反应数按类型分解
+- 同时导出 `reaction_counts.csv` 供后续统计
+
+### 4.6 竞聚率分析
+
+`reactivity-ratio` 子命令从 mlcgsim ML 驱动 CG 模拟输出统计竞聚率 r1/r2（末端模型，r1=k11/k12、r2=k22/k21），三种用法：
+
+```bash
+# 全流程：扫轨迹 + 估计
+python -m LmpPy.output_analysis reactivity-ratio ./process1 ./process2 -o ./analysis/
+# 只统计计数（可复用）
+python -m LmpPy.output_analysis reactivity-ratio ./process1 ./process2 --counts-out per_cycle_counts.csv
+# 只做估计（跳过轨迹扫描）
+python -m LmpPy.output_analysis reactivity-ratio --from-counts per_cycle_counts.csv -o ./analysis/
+```
+
+注意 `--pair-cutoff`（默认 10.0 Å）需与模拟实际使用的 `pair_cutoff` 一致，否则归一化基准不匹配。
 
 ---
 
@@ -456,8 +485,9 @@ output_analysis/
 | `*.dist.tgt` | 分布计算 | VOTCA 格式输出 | IBM 势能计算 |
 | `*_potential.txt` | IBM 势能 | 调用 `calc_ibm_potential.py` | CG 势能参数 |
 | LAMMPS tables | IBM 势能 | `--lammps-tables` | LAMMPS table 势能 |
-| `comparison.png` | 分布平滑 | 可选 | 平滑效果对比 |
-| `report.txt` | 分布平滑 | 可选 | 平滑质量报告 |
-| `chain_length/*.png` | 后处理分析 | 独立分析脚本 | 聚合度分析 |
-| `reaction_distance/*.png` | 后处理分析 | 独立分析脚本 | 反应距离分析 |
-| `js_divergence/*.png` | 后处理分析 | 独立分析脚本 | 可重复性分析 |
+| `{name}_comparison.png` | 分布平滑 | 可选 | 平滑效果对比 |
+| `{name}_report.txt` | 分布平滑 | 可选 | 平滑质量报告 |
+| `chain_length_distribution.png` | 后处理分析 | `chain-length` | 聚合度分析 |
+| `distance_distribution.png` | 后处理分析 | `distance` | 反应距离分析 |
+| `reaction_stats.png` | 后处理分析 | `reaction-stats` | 反应类型占比与循环演化 |
+| `reactivity_ratio_summary.json` 等 | 后处理分析 | `reactivity-ratio` | 竞聚率估计与诊断 |

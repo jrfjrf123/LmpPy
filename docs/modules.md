@@ -157,7 +157,7 @@ class ConfigValidator:
 
 | 函数 | 参数 | 返回值 | 说明 |
 |---|---|---|---|
-| `load_all_configs(config_dir)` | `config_dir: str` | `(SystemConfig, LAMMPSParams, List[ReactionConfig])` | 一次性加载所有配置 |
+| `load_all_configs(config_dir)` | `config_dir: str` | `(SystemConfig, LAMMPSParams, List[ReactionConfig])` | 一次性加载所有配置（⚠️ 见下方已知问题） |
 | `validate_config(config_dir, print_report=True)` | `config_dir: str, print_report: bool` | `ValidationResult` | 验证配置目录完整性 |
 | `load_reactions_from_directory(config_dir, reaction_configs, validate_files=True)` | `config_dir, reaction_configs: List[Dict], validate_files: bool` | `List[ReactionInfo]` | 从 `reactions/` 目录统一加载反应配置 |
 
@@ -179,6 +179,23 @@ sys_cfg, lmp_params, reactions = load_all_configs("config/")
 result = validate_config("config/")
 result.print_report()
 ```
+
+> **⚠️ 已知问题：`load_all_configs()` / `load_all_reactions()` 对含反应的配置目录会报错**
+>
+> `ConfigLoader.load_reaction_config()`（`core/config_loader.py:868-869`）用**系统级**
+> 映射加载器 `load_mapping_config()` 去读**反应级**的 `{name}_pre_mapping.yaml`，
+> 后者要求 `site-types`+`config` 两段，而反应映射文件的既定格式是 `mapping:`
+> （见 `configuration.md` §4）。因此在任何含 `reactions/` 的配置目录上都会抛
+> `ConfigMissingFieldError: 缺少必需字段: 'site-types'`。
+>
+> 受影响的只有这两个便捷函数；主流程 `run_refactored.py` 不经过它们，用的是
+> `load_lammps_params()` 内部的 `load_reactions_from_directory()`，工作正常。
+> `core/template_parser.py` 与 `core/cg_reaction_identifier.py` 也都按 `mapping:`
+> 格式正确解析。
+>
+> 修复方向：让 `load_reaction_config()` 改按 `mapping:` 格式解析（相应地
+> `ReactionConfig.pre_mapping`/`post_mapping` 的类型不再是 `MappingConfig`）。
+> 这两个字段目前在仓库内无任何消费方。
 
 ---
 
@@ -851,7 +868,7 @@ class SmokeTestHarness:
 **使用示例:**
 
 ```python
-from LmpPy.core import SmokeTestHarness
+from LmpPy.core.smoke_test_harness import SmokeTestHarness
 
 harness = SmokeTestHarness("config/", loop_num=5)
 report = harness.run()

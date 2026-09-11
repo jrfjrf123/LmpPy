@@ -1,5 +1,16 @@
 # ReactionLocator 修复记录
 
+> **⚠️ 历史文档，描述的是已被取代的实现。**
+>
+> 本文记录的是对 `core/reaction_locator.py` 的修复，而 `ReactionLocator` 与
+> `core/cg_mapper.py` 的 `CGMapper` **均已不在 `run_refactored.py` 的主流程中**。
+> 生产路径改用 CG 层签名匹配（`_update_cg_mapping`，见 `workflow.md` §3.2 与
+> `bond-modes.md`）。
+>
+> 因此下文中的方法签名（含 `ids_before`/`ids_after` 的 7 参版本）与 DEBUG 输出
+> **与当前代码不一致**；§3 记录的是当时对 `run_refactored.py` 的改动，现已被后续
+> 重构覆盖。保留本文仅作排查思路的参考。
+
 ## 问题描述
 
 在纯 CG 体系中，LAMMPS `fix bond/react` 正确执行了 9 次反应，但 Python 后处理的 `ReactionLocator` 返回 0 个匹配。
@@ -106,7 +117,9 @@ def _match_post_template(self, template, graph_after, type_after_map, pre_match,
 
 ### 2. `lammps_data_extractor.py` — DEBUG 验证
 
-在 `extract_atoms()` 中新增 DEBUG 输出，验证 `gather_atoms` 返回的数组顺序：
+> **已移除**：下述 `[DEBUG] gather_atoms` 打印**当前代码中不存在**（当时的临时排查代码，后续已清理）。
+
+当时在 `extract_atoms()` 中新增的 DEBUG 输出，用于验证 `gather_atoms` 返回的数组顺序：
 
 ```python
 print(f"[DEBUG] gather_atoms: first 5 entries:")
@@ -122,11 +135,16 @@ print(f"  => atom IDs sorted, types[i] 对应 atom ID=i+1，可用 types[a-1] �
 
 #### 3.1 `_update_cg_mapping()` 方法签名变更
 
+> **注意当前签名**：经后续重构，`run_refactored.py:533` 的实际签名为
+> `_update_cg_mapping(self, bonds_before, bonds_after, types_after, n_atoms)`——
+> 4 个参数，**不含** `ids_before`/`ids_after`/`types_before`。下述 7 参版本是当时
+> 的中间状态，已被取代。
+
 ```python
-# 修改前
+# 当时的"修改前"
 def _update_cg_mapping(self, bonds_before, bonds_after, types_before, types_after, n_atoms):
 
-# 修改后
+# 当时的"修改后"（已被取代）
 def _update_cg_mapping(self, bonds_before, bonds_after, types_before, types_after,
                        ids_before, ids_after, n_atoms):
 ```

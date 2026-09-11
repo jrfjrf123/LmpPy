@@ -7,19 +7,19 @@
 
 ## 目录
 
-1. [system.yaml - 体系配置](#1-systemyaml-体系配置)
-2. [lammps_params.yaml - LAMMPS 运行参数](#2-lammps_paramsyaml-lammps-运行参数)
-   - [2.1 simulation](#21-simulation-模拟基本参数)
-   - [2.2 steps](#22-steps-步数配置)
-   - [2.3 npt](#23-npt-npt控温控压参数)
-   - [2.4 bond_react](#24-bond_react-bondreact配置)
-   - [2.5 bond_create (v2.6+)](#25-bond_create-v26-bondcreate配置)
-   - [2.6 molecules](#26-molecules-分子模板配置)
-   - [2.7 files](#27-files-文件配置)
-   - [2.8 mass_list](#28-mass_list-元素质量映射)
+1. [system.yaml - 体系配置](#1-systemyaml---体系配置)
+2. [lammps_params.yaml - LAMMPS 运行参数](#2-lammps_paramsyaml---lammps-运行参数)
+   - [2.1 simulation](#21-simulation---模拟基本参数)
+   - [2.2 steps](#22-steps---步数配置)
+   - [2.3 npt](#23-npt---npt控温控压参数)
+   - [2.4 bond_react](#24-bond_react---bondreact-配置)
+   - [2.5 bond_create (v2.6+)](#25-bond_create-v26---bondcreate-配置)
+   - [2.6 molecules](#26-molecules---分子模板配置)
+   - [2.7 files](#27-files---文件配置)
+   - [2.8 mass_list](#28-mass_list---元素质量映射)
 3. [映射文件格式 (mapping YAML)](#3-映射文件格式-mapping-yaml)
-   - [3.1 site-types](#31-site-types-bead类型定义)
-   - [3.2 config](#32-config-映射配置)
+   - [3.1 site-types](#31-site-types---bead-类型定义)
+   - [3.2 config](#32-config---映射配置)
 4. [反应映射文件格式](#4-反应映射文件格式)
 5. [断点续算配置](#5-断点续算配置)
 6. [附录: 完整配置示例](#6-附录-完整配置示例)
@@ -475,14 +475,14 @@ bond_react:
   reactions:
     - name: "rxn1"
       cutoff: 5.0
-      map_file: "rxn1.map"
       pre_mol: "mol1"
       post_mol: "mol2"
-      pre_template: "rxn1_pre.lammpstemplate"
-      post_template: "rxn1_post.lammpstemplate"
-      pre_mapping: "rxn1_pre_mapping.yaml"
-      post_mapping: "rxn1_post_mapping.yaml"
 ```
+
+> 程序只从 YAML 读取 `name` / `cutoff` / `pre_mol` / `post_mol` 四个键，其余
+> （`map_file`、`pre_template`、`post_template`、`pre_mapping`、`post_mapping`）
+> 一律按 `reactions/{name}/` 目录约定自动发现。在下文中这些键均标为可选，
+> 写入 YAML 也不会被读取。
 
 #### bond_react.stabilization
 
@@ -614,25 +614,6 @@ reactions:
     post_mapping: "rxn1_post_mapping.yaml"
 ```
 
-##### reactions[].multi_object_pairs (v2.6+)
-
-| 属性 | 值 |
-|------|-----|
-| **字段名** | `reactions[].multi_object_pairs` |
-| **类型** | `List[List[int]]` |
-| **默认值** | `[]`（可选） |
-| **必需** | 否 |
-
-**说明**: 多目标反应对列表。用于处理一个反应中涉及多对原子同时成键的复杂场景。每个元素为 `[atom1, atom2, ...]` 形式的列表。
-
-**YAML 示例**:
-```yaml
-reactions:
-  - multi_object_pairs:
-      - [1, 2]
-      - [3, 4]
-```
-
 #### 推荐生产配置（AA-AM 自由基共聚，SCUT_HPC1 实测可用，2026-08-21）
 
 以下组合在含 20 条种子链 + 1000 自由单体（10480 原子）的 GAFF 体系上
@@ -656,7 +637,7 @@ bond_react:
       ...
 ```
 
-详见 `docs/pre_data_gen/pitfalls.md` §9。
+详见工作区（三个仓库的共同父目录）下的 `docs/pre_data_gen/pitfalls.md` §9。
 
 ---
 

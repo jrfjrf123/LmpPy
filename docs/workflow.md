@@ -145,58 +145,78 @@ LmpPy 是一个 LAMMPS `bond/react` / `bond/create` 后处理框架，负责：
 #### 2.1.1 加载 system.yaml
 
 ```yaml
-# system.yaml 核心字段
-name: "my_system"                    # 体系名称
-mapping_files:                       # CG 映射定义（多个文件）
-  - "mappings/mapping_monomer.yaml"
-  - "mappings/mapping_end.yaml"
+# system.yaml 核心字段（全部位于顶层 system: 之下）
+system:
+  name: "my_system"                  # 体系名称
+  bead_type_names:                   # 必需：bead 类型名 → LAMMPS type 编号
+    Bead1: 1
+    Bead2: 2
+  mapping_files:                     # 必需：每项需同时有 path 与 copies
+    - path: "mappings/mapping_monomer.yaml"
+      copies: 1000
+    - path: "mappings/mapping_end.yaml"
+      copies: 200
 ```
 
-`ConfigLoader.load_system_config()` 解析后生成 `SystemConfig` dataclass。
+`ConfigLoader.load_system_config()` 解析后生成 `SystemConfig` dataclass。校验规则见 `core/config_loader.py:506-536`：顶层必须有 `system`，`system` 内必须有 `mapping_files` 与 `bead_type_names`，且每个 `mapping_files[i]` 必须同时含 `path` 和 `copies`。
 
 #### 2.1.2 加载 lammps_params.yaml
 
 ```yaml
-# lammps_params.yaml 核心字段
-loop_num: 100                        # 主循环次数
-temperature: 400.0                   # 模拟温度 (K)
-pressure: 1.0                        # 模拟压力 (atm)
-ensemble: "nvt"                      # 系综 (nvt / npt)
-data_file: "data.lmp"                # LAMMPS data 文件
-timestep: 0.5                        # 时间步 (fs)
-bond_react_check_step: 50            # bond/react 检查步数
-run_step: 200                        # 总运行步数
-nve_limit_step: 10                   # NVE/limit 步数
-stabilization: 0.1                   # 稳定化参数
-input_script: null                   # 外部输入脚本（可选）
-initial_cg_mapping: "initial_cg_    # 初始 CG 映射（断点续算用）
-  compare_list.csv"
-output_cg_trajectory: "cg_trajectory.lammpstrj"
-output_reaction_count: "reaction_num.txt"
-read_data_extra:                     # read_data 额外参数
-  special_per_atom: 4
-  bond_per_atom: 3
-  angle_per_atom: 0
-  dihedral_per_atom: 0
-reactions:                           # bond/react 反应定义列表
-  - name: "rxn1"
-    pre_mol: "monomer"
-    post_mol: "dimer"
-    map_file: "rxn1.map"
-    cutoff: 6.0
-    pre_template: "templates/rxn1_pre.lammpstemplate"
-    post_template: "templates/rxn1_post.lammpstemplate"
-molecules:                           # 分子模板（可选，向后兼容）
+# lammps_params.yaml 核心字段（分五段；前缀为 [必需] 的段/键缺失即报错）
+simulation:                          # [必需]
+  loop_num: 100                      # 主循环次数
+  dt: 0.001                          # 时间步长 (ps)
+  timestep: 0.5                      # LAMMPS timestep (fs)
+  temperature: 400.0                 # 模拟温度 (K)
+  pressure: 1.0                      # 模拟压力 (atm)
+  ensemble: "nvt"                    # 系综 (nvt / npt)
+  pair_style: "lj/cut"               # 可选，默认 lj/cut
+
+steps:                               # [必需]
+  bond_react_check: 50               # bond/react 检查步数
+  run_per_loop: 200                  # 每个 loop 总步数
+  nve_limit: 10                      # NVE/limit 步数
+
+npt:                                 # [必需]
+  tcouple: 100                       # 温度耦合常数 (fs)
+  pcouple: 1000                      # 压力耦合常数 (fs)
+
+bond_react:                          # [必需]
+  stabilization: 0.03                # 稳定化参数 (Å)，无条件要求存在
+  reactions:                         # 反应列表；程序只读 name/cutoff/pre_mol/post_mol
+    - name: "rxn1"
+      cutoff: 6.0
+      pre_mol: "monomer"
+      post_mol: "dimer"
+      # map_file / pre_template / post_template / pre_mapping / post_mapping
+      # 一律按 reactions/{name}/ 目录约定自动发现，写入此处不会被读取
+
+molecules:                           # 可选，分子模板
   monomer: "templates/monomer.mol"
   dimer: "templates/dimer.mol"
-bond_create_config: null             # bond/create 配置（非 null 时启用 bond/create 模式）
+
+files:                               # 可选，以下各项均有默认值
+  data_file: "data.lmp"
+  initial_cg_mapping: "AtomId_BeadId_compare_list.csv"
+  read_data_extra:                   # read_data 额外参数
+    special_per_atom: 4
+    bond_per_atom: 3
+    angle_per_atom: 0
+    dihedral_per_atom: 0
+
+# bond_create:                       # 可选；enabled: true 时与 bond_react.reactions 互斥
 ```
 
-`ConfigLoader.load_lammps_params()` 解析后生成 `LAMMPSParams` dataclass。
+`ConfigLoader.load_lammps_params()` 解析后生成 `LAMMPSParams` dataclass。注意 `run_per_loop` 必须严格大于 `nve_limit + bond_react_check`，否则报错（`core/config_loader.py:675-679`）。
 
 #### 2.1.3 加载质量列表
 
-调用 `ConfigLoader.load_mass_list(data_file)`，该函数内部调用 `parse_masses_from_data_file()` 从 LAMMPS data 文件解析 Masses 部分：
+调用 `ConfigLoader.load_mass_list(data_file)`。优先级（`core/config_loader.py:612-625`）：
+
+1. `config_dir/mass_list.yaml` 存在 → 直接用它（作为覆盖配置，**忽略** `data_file`）
+2. 否则若传入了 `data_file` → 调用 `parse_masses_from_data_file()` 解析其 Masses 段
+3. 两者都没有 → 抛 `ConfigError`
 
 ```
 Masses
@@ -231,7 +251,7 @@ Masses
 - `all_signatures` — 所有签名列表
 - `end_types`, `monomer_types`, `interior_types` — 类型集合
 
-此签名系统是 `ReactionLocator` + `CGMapper` 主流程的独立交叉验证机制，完全无 LAMMPS 依赖。
+此签名系统是生产路径下 CG 映射更新的核心依据（取代了早期的 AA 级 `ReactionLocator` + `CGMapper` 方案），完全无 LAMMPS 依赖。
 
 ### 2.2 CG 映射生成/加载
 
@@ -242,17 +262,27 @@ Masses
 读取 `system.yaml` 中 `mapping_files` 字段指定的 YAML 文件，每个文件描述一种分子的 AA→CG 映射关系：
 
 ```yaml
-# mapping_monomer.yaml
-beads:
-  - name: "Head"
-    type: 1
-    atoms: [1, 2, 3]
-  - name: "Mid"
-    type: 2
-    atoms: [4, 5, 6]
+# mapping_monomer.yaml —— 实际格式为 site-types + config 两段
+site-types:
+  Head:
+    index: [0, 1, 2]        # 相对该 bead 起始位置的 0-based 原子偏移
+    x-weight: [12, 12, 1]   # 质心权重，长度须与 index 一致
+  Mid:
+    index: [0, 1, 2]
+    x-weight: [12, 12, 1]
+
+config:
+  - anchor: 0               # 固定为 0，程序自动累积偏移
+    repeat: 1000            # 分子数
+    offset: 6               # 分子间原子 ID 偏移
+    sites:                  # [site 类型名, 相对于 anchor 的起始位置]
+      - [Head, 0]
+      - [Mid, 3]
 ```
 
-`MappingGenerator.generate()` 将 YAML 定义转换为 `CGCompareList.data` — 一个 `(n_atoms, 5)` 的 NumPy 数组，列含义：
+原子 ID 计算：`AA_id = anchor + site_offset + index[i] + 1`。详见 `configuration.md` §3。
+
+`MappingGenerator.generate()` 将 YAML 定义转换为 `CGCompareList.data` — 一个 `(n_mapped_atoms, 5)` 的 NumPy 数组（**行数等于被 bead 覆盖的原子数，不是体系总原子数**；mapping 未覆盖的原子不出现在此数组中），列含义：
 
 | 列索引 | 名称 | 说明 |
 |---|---|---|
@@ -290,16 +320,16 @@ else:
 1 angles
 0 dihedrals
 
-Coords
-
-1 0.000 0.000 0.000
-2 1.540 0.000 0.000
-...
-
 Types
 
 1 1
 2 2
+...
+
+Coords
+
+1 0.000 0.000 0.000
+2 1.540 0.000 0.000
 ...
 
 Bonds
@@ -308,6 +338,8 @@ Bonds
 2 1 2 3
 ...
 ```
+
+> **段顺序不可调换**：`TemplateParser` 按固定的 `section_order = ['types', 'coords', 'bonds', 'angles', 'dihedrals']` 切片（`core/template_parser.py:232`），每个段的结束位置取"下一个段在 `section_order` 中出现的位置"。若把 `Coords` 写在 `Types` 之前，`Types` 段的切片范围为空，`atom_types` 会解析失败。
 
 **映射文件 (.map) 格式**：
 
@@ -369,16 +401,22 @@ lmp.command("velocity all create <temperature> <seed>")
 `CGInitializer` 是初始化阶段的整合组件：
 
 ```
-CGInitializer
-├── generate_cg_mapping_from_yaml()  ← 调用 MappingGenerator
-├── init_aa_bonds_from_data()        ← 调用 parse_bonds_from_data_file()
-├── convert_aa_bonds_to_cg_bonds()   ← 调用 atom_bonds_to_cg_bonds()
-├── derive_cg_topology()             ← 调用 derive_cg_topology_from_bonds()
-│   ├── CG 键推导
-│   ├── CG 角推导 (derive_angles_from_bonds)
-│   └── CG 二面角推导 (derive_dihedrals_from_bonds)
-└── validate_mapping()               ← 调用 validate_cg_mapping_consistency()
+CGInitializer(config_dir)
+├── generate_initial_cg_mapping(output_path=None)  → CGCompareList
+│   └── 调用 MappingGenerator 生成 AA→CG 映射
+├── extract_aa_bonds(data_file=None)               → np.ndarray
+│   └── 从 LAMMPS data 文件解析 AA 键
+├── generate_cg_topology(data_file=None)           → CGTopology
+│   └── AA 键 → CG 键，并推导 CG 角与二面角
+├── verify_consistency(cg_compare_list, cg_topology)→ List[str]
+│   └── 一致性校验，返回问题列表（空列表表示通过）
+└── initialize(output_mapping=None,
+               output_topology_prefix=None,
+               verify=True)                        → CGSystem
+    └── 串联以上各步的完整流程
 ```
+
+模块级便捷函数 `initialize_cg_system(config_dir, ...)` 等价于 `CGInitializer(config_dir).initialize(...)`。
 
 输出 `CGSystem` 数据类，包含：
 - `cg_compare_list` — CG 映射
@@ -464,10 +502,10 @@ Step 2 流水线
 │  2b. BondDetector.detect() → BondChanges                            │
 │      └─ created_bonds, deleted_bonds (集合运算)                      │
 ├──────────────────────────────────────────────────────────────────────┤
-│  2c. ReactionLocator.locate() OR CG 签名匹配                        │
-│      └─ pre-before + post-after 双重验证 → List[ReactionMatch]      │
+│  2c. CG 签名匹配（bond/react）OR 距离/类型条件（bond/create）        │
+│      └─ load_template_signatures + identify_reaction                 │
 ├──────────────────────────────────────────────────────────────────────┤
-│  2d. CGMapper.batch_update() → 更新 CG 映射                         │
+│  2d. _update_cg_mapping() / update_cg_mapping_create() → 更新 CG 映射│
 ├──────────────────────────────────────────────────────────────────────┤
 │  2e. CGConverter.convert() → CG 坐标 (惰性索引缓存)                 │
 ├──────────────────────────────────────────────────────────────────────┤
@@ -535,67 +573,33 @@ deleted_codes = codes_before - codes_after
 - `deleted_bonds`: `(n_deleted, 3)` — 反应删除的键
 - `has_changes`: `bool` — 是否有任何键变化
 
-#### 子步骤 2c: 反应定位
+#### 子步骤 2c + 2d: 反应识别与 CG 映射更新
 
-根据反应模式选择不同的定位策略：
+主流程**不做** AA 级模板匹配。`run_refactored.py` 的两个模式都直接在 CG 层处理，通过 `identify_reaction()` 返回的签名来确定反应类型：
 
-**策略 A: AA 级模板匹配 (ReactionLocator.locate)**
-
-仅用于 `bond/react` 模式。核心是 **pre-before + post-after 双重验证**：
-
-```
-pre template × 反应前体系  --->  匹配成功
-                                   │
-                                   ▼
-post template × 反应后体系  --->  匹配成功 → 确认反应
-```
-
-详细匹配流程：
-
-1. **BondDetector** 检测键变化（复用 2b 结果）
-2. **构建键连图**: 从键数组构建邻接表 `Dict[int, List[int]]`
-3. **聚类反应原子**: 使用 `created_bonds` 通过 BFS 聚类同一反应的原子
-   - 同一 created bond 的两个原子必在同一反应中
-   - 不在 created_bonds 中的 changed atoms 合并到相邻 component
-4. **k-hop 邻域提取**: 对每个 component 提取 k-hop 邻域（k=max(模板原子数, 2)）
-5. **BFS 匹配**: 从 initiator atom 开始广度优先匹配
-   - pre-match: 处理孤立原子（反应前两个分子未连接）
-   - post-match: 不允许未匹配原子（反应后分子应连通）
-   - 多起点 BFS: 处理模板图不连通的情况
-
-**策略 B: CG 级签名匹配 (_update_cg_mapping)**
-
-用于 `bond/create` 模式以及作为 AA 级模板的补充。流程：
+**bond/react 模式: CG 签名匹配 (`_update_cg_mapping`)**
 
 1. **AA 键 → CG 键转换**: `atom_bonds_to_cg_bonds()`
-2. **CG 键差集**: `get_cg_bond_diff()` → 新建的 CG 键
-3. **三级匹配**:
+2. **CG 键差集**: 新建的 CG 键
+3. **两级匹配**（经 `identify_reaction()`）:
    - 3-bead 签名粗筛: 匹配 `(interior_type, end_type, monomer_type)` 三元组
-   - chain 精筛: 沿键链向外追踪类型序列
-   - `match_reaction()` 返回匹配的 `CGReactionSignature`
+   - chain 精筛: 沿键链向外追踪类型序列，按需启用
 4. **向量化批量应用**: 收集所有 bead_type 和 bead_id 更新，一次性写入 `cg_compare_list.data`
 
-#### 子步骤 2d: CG 映射更新
+**bond/create 模式: 条件更新 (`update_cg_mapping_create`)**
 
-`CGMapper.batch_update()` 或 `update_cg_mapping_create()`：
+不依赖反应模板，直接按 `bond_create.cg_type_map` 把成键后的 bead 类型改写：
 
-**AA 级路径 (CGMapper)**:
-```
-1. 检查模板是否有 post_cg_mapping → 无则跳过
-2. 获取 edge_atoms（模板边界原子，不参与 CG 更新）
-3. 按 local_bead_id 分组模板原子
-4. 对每个 bead:
-   a. 找到对应体系原子列表（排除边缘原子）
-   b. 分配新全局 bead_id
-   c. 使用 post_cg_mapping 中的 bead_type
-   d. 更新所有原子
-5. 返回更新后的 CGMapping
+```python
+update_cg_mapping_create(
+    cg_mapping_data,        # cg_compare_list.data，原地修改
+    bonds_before,           # 反应前 AA 键
+    bonds_after,            # 反应后 AA 键
+    cg_type_map,            # {旧 bead_type: 新 bead_type}
+)
 ```
 
-**CG 级路径 (update_cg_mapping_create / _update_cg_mapping)**:
-- 直接操作 `cg_compare_list.data`
-- 向量化更新 `bead_type` 和 `bead_id` 列
-- 不依赖 AA 级模板
+> **历史说明**：`core/reaction_locator.py` 的 `ReactionLocator` 与 `core/cg_mapper.py` 的 `CGMapper.batch_update()` 实现了 AA 级 pre/post 模板双重验证与 bead 重编号，但**未被 `run_refactored.py` 引用**，属于早期设计遗留。生产路径是上面的 CG 签名匹配。
 
 #### 子步骤 2e: CG 坐标转换
 
@@ -691,7 +695,7 @@ Phase 2: 全原子系综
 2. 非反应原子组: 正常系综控制，提供热浴/压浴
 3. 第二阶段: 全原子统一系综控制，恢复系统平衡
 
-**无反应时的跳过逻辑**: 如果没有反应发生，跳过 Step 3 弛豫直接进入 Step 4。
+**弛豫无跳过逻辑**: `_run_relaxation()` / `_run_relaxation_create()` 在每轮循环中**无条件执行**（`run_refactored.py:437-440`），无论本轮是否发生反应。无反应时只省去 Step 2 内部的 CG 映射更新与缓存失效。
 
 #### 3.3.2 bond/create 弛豫 (_run_relaxation_create)
 

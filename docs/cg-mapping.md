@@ -375,7 +375,11 @@ system:
     Bead3: 3
 ```
 
-这使得多个 mapping 文件可以共享同一套 bead 类型编号系统。如果未提供此映射，程序会自动按 site-types 中定义的顺序分配编号。
+这使得多个 mapping 文件可以共享同一套 bead 类型编号系统。
+
+> **注意 `bead_type_names` 不能省略**：走 `ConfigLoader.load_system_config()` 时它是必需字段，缺失直接抛 `ConfigMissingFieldError`（`core/config_loader.py:533`），不存在"自动按顺序编号"的回退。
+>
+> 只有在绕过 ConfigLoader、直接调用 `MappingGenerator.generate()` 并传入不含 `bead_type_names` 的 `MappingConfig` 时，才会走 `bead_type_map.get(site_name, 1)` 的回退——即**全部落为 type 1**，而非按顺序递增（`core/mapping_generator.py:129`）。
 
 ---
 
@@ -383,47 +387,69 @@ system:
 
 该脚本将 YAML 格式的 CG 映射文件转换为 CSV 格式，可直接在体系未运行前生成初始映射。
 
+> **⚠️ 此脚本的 `-s` 参数用的不是平台的 `system.yaml` 格式。** 它读取的是
+> `system.names`（mapping 文件路径列表）与 `system.numbers`（对应的 copies 数）两个键
+> （`scripts/yaml2csv_mapping.py:127-128`），而平台的 `system.yaml` 用的是
+> `system.mapping_files: [{path, copies}]`。直接传平台的 `system.yaml` 会抛
+> `KeyError: 'names'`。此脚本尚未跟进配置格式变更，目前只适用于旧格式文件。
+
 ### 8.1 命令格式
 
 ```bash
-python -m LmpPy.scripts.yaml2csv_mapping -s system.yaml -o mapping.csv
+python -m LmpPy.scripts.yaml2csv_mapping -s legacy_system.yaml -o mapping.csv
 ```
 
 ### 8.2 参数列表
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `-s` / `--system-yaml` | system.yaml 文件路径（必需） | — |
+| `-s` / `--system-yaml` | 旧格式 system.yaml 文件路径（必需，需含 `system.names`/`system.numbers`） | — |
 | `-o` / `--output` | 输出 CSV 文件名 | `AtomId_BeadId_compare_list.csv` |
-| `--custom` | 使用硬编码的自定义 bead type 映射 | 关闭 |
+| `--custom-map FILE` | 从 YAML/JSON 文件加载自定义 bead type 映射 `{site_type_name: bead_type_id}` | — |
+| `--custom` | 使用硬编码的 EPR 自定义 bead type 映射（向后兼容兜底） | 关闭 |
 | `-q` / `--quiet` | 安静模式，不输出详细信息 | 关闭 |
 
 ### 8.3 使用示例
 
 ```bash
 # 基本用法（自动生成 bead type）
-python -m LmpPy.scripts.yaml2csv_mapping -s config/system.yaml -o initial_mapping.csv
+python -m LmpPy.scripts.yaml2csv_mapping -s legacy_system.yaml -o initial_mapping.csv
 
-# 使用自定义 bead type 映射
-python -m LmpPy.scripts.yaml2csv_mapping -s config/system.yaml --custom -o mapping.csv
+# 从文件加载自定义 bead type 映射
+python -m LmpPy.scripts.yaml2csv_mapping -s legacy_system.yaml --custom-map types.yaml -o mapping.csv
+
+# 使用硬编码的 EPR 映射
+python -m LmpPy.scripts.yaml2csv_mapping -s legacy_system.yaml --custom -o mapping.csv
 
 # 安静模式
-python -m LmpPy.scripts.yaml2csv_mapping -s config/system.yaml -q
+python -m LmpPy.scripts.yaml2csv_mapping -s legacy_system.yaml -q
 ```
+
+> **推荐替代**：新体系请直接用 `python -m LmpPy.scripts.generate_initial_mapping`（见 `cli-scripts.md` §9），
+> 或调用 `MappingGenerator.generate()`，二者均支持当前的 `mapping_files` 格式。
 
 ### 8.4 自定义 bead type 映射
 
-硬编码的自定义映射在脚本中的 `CUSTOM_BEAD_TYPE_MAP` 字典中定义：
+映射来源优先级（`scripts/yaml2csv_mapping.py:246-254`）：
+
+1. `--custom-map FILE` — 从 YAML/JSON 文件读取 `{site_type_name: bead_type_id}`
+2. `--custom` — 使用脚本内硬编码的 `CUSTOM_BEAD_TYPE_MAP`（EPR 体系，向后兼容兜底）
+3. 都不给 — `custom_bead_type_map = None`，按 site 出现顺序自动连续编号
+
+硬编码字典的完整内容：
 
 ```python
 CUSTOM_BEAD_TYPE_MAP = {
-    "Bead1": 1,    # 链珠子
-    "Bead2": 2,    # 链反应珠子
-    "Bead3": 1,    # ...
+    "Bead1": 1,    # chain E
+    "Bead2": 2,    # chain P
+    "Bead3": 1,    # chain reactor E
+    "Bead4": 2,    # chain reactor P
+    "Bead5": 3,    # E
+    "Bead6": 4,    # P
+    "Bead7": 1,    # chain head E
+    "Bead8": 2     # chain head P
 }
 ```
-
-当使用 `--custom` 参数时，脚本使用此字典替代自动生成的连续编号。
 
 ### 8.5 输出示例
 

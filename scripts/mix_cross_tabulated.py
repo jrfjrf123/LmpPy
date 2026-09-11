@@ -2,7 +2,8 @@
 """
 交叉混合两个 tabulated 势能表，生成异核（cross）势能表。
 
-依据规范: docs/cross-tabulation-mixing.md (v2.0 离散势能表交叉混合操作规范)
+依据规范: <工作区根目录>/docs/cross-tabulation-mixing.md (v2.0 离散势能表交叉混合操作规范)
+         注: 该文件位于 LmpPy 的父目录, 不在 LmpPy/docs 内
 
 流程（严格按规范）:
     1. 强制尾部归零化: 取末尾 10% 数据点平均值 V_tail, 全局平移 V' = V - V_tail
@@ -371,7 +372,7 @@ def main():
   python -m LmpPy.scripts.mix_cross_tabulated nb22.pot.table nb33.pot.table -o nb23.pot.table
   python -m LmpPy.scripts.mix_cross_tabulated nb22.pot.table nb44.pot.table -o nb24.pot.table
 
-规范: docs/cross-tabulation-mixing.md (v2.0)
+规范: <工作区根目录>/docs/cross-tabulation-mixing.md (v2.0)
   sigma_mix = (sigma_A + sigma_B) / 2,  eps_mix = sqrt(eps_A * eps_B)
   V*_mix = sign(V*_A) * sqrt(|V*_A * V*_B|),  异号时取负以保持吸引趋势
 """,
