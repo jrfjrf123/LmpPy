@@ -55,7 +55,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/user/lmp_py_react"
+Homepage = "https://github.com/jrfjrf123/LmpPy"
+Repository = "https://github.com/jrfjrf123/LmpPy"
 
 # pyproject.toml 与包本体同级，故将 LmpPy 映射到项目根目录 "."
 [tool.setuptools]
