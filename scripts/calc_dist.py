@@ -835,12 +835,37 @@ def run_pipeline(args):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # 3.5 检查已存在文件（--skip-existing 时跳过对应计算）
+    skip_bond_types, skip_angle_types, skip_dihedral_types, skip_pair_types = set(), set(), set(), set()
+    if args.skip_existing:
+        for f in output_dir.glob("*.dist.tgt"):
+            m = re.match(r'bond_type(\d+)\.dist\.tgt', f.name)
+            if m:
+                skip_bond_types.add(int(m.group(1))); continue
+            m = re.match(r'angle_type(\d+)\.dist\.tgt', f.name)
+            if m:
+                skip_angle_types.add(int(m.group(1))); continue
+            m = re.match(r'dihedral_type(\d+)\.dist\.tgt', f.name)
+            if m:
+                skip_dihedral_types.add(int(m.group(1))); continue
+            m = re.match(r'pair_type(\d+)_(\d+)\.dist\.tgt', f.name)
+            if m:
+                skip_pair_types.add((int(m.group(1)), int(m.group(2))))
+        if any([skip_bond_types, skip_angle_types, skip_dihedral_types, skip_pair_types]):
+            print(f"\n--skip-existing: 跳过 bond {sorted(skip_bond_types)}, "
+                  f"angle {sorted(skip_angle_types)}, "
+                  f"dihedral {sorted(skip_dihedral_types)}, "
+                  f"pair {sorted(skip_pair_types)}")
+
     # 4. 计算键距离分布
     if len(bonds_df) > 0:
         print("\n计算键距离分布...")
         atom_cols = ['atom1_id', 'atom2_id'] if 'atom1_id' in bonds_df.columns else ['atom1', 'atom2']
 
         for bond_type in sorted(bonds_df['bond_type'].unique()):
+            if bond_type in skip_bond_types:
+                print(f"  bond_type{bond_type}: 已存在，跳过")
+                continue
             bonds_of_type = bonds_df[bonds_df['bond_type'] == bond_type]
             bond_pairs = bonds_of_type[atom_cols].values.T
 
@@ -860,6 +885,9 @@ def run_pipeline(args):
         atom_cols = ['atom1_id', 'atom2_id', 'atom3_id'] if 'atom1_id' in angles_df.columns else ['atom1', 'atom2', 'atom3']
 
         for angle_type in sorted(angles_df['angle_type'].unique()):
+            if angle_type in skip_angle_types:
+                print(f"  angle_type{angle_type}: 已存在，跳过")
+                continue
             angles_of_type = angles_df[angles_df['angle_type'] == angle_type]
             angle_triplets = angles_of_type[atom_cols].values.T
 
@@ -879,6 +907,9 @@ def run_pipeline(args):
         atom_cols = ['atom1_id', 'atom2_id', 'atom3_id', 'atom4_id'] if 'atom1_id' in dihedrals_df.columns else ['atom1', 'atom2', 'atom3', 'atom4']
 
         for dihedral_type in sorted(dihedrals_df['dihedral_type'].unique()):
+            if dihedral_type in skip_dihedral_types:
+                print(f"  dihedral_type{dihedral_type}: 已存在，跳过")
+                continue
             dihedrals_of_type = dihedrals_df[dihedrals_df['dihedral_type'] == dihedral_type]
             dihedral_quads = dihedrals_of_type[atom_cols].values.T
 
@@ -903,6 +934,9 @@ def run_pipeline(args):
         # 计算每对 bead type 的 RDF
         for i, type1 in enumerate(unique_types):
             for type2 in unique_types[i:]:
+                if (type1, type2) in skip_pair_types:
+                    print(f"  pair type{type1}-{type2}: 已存在，跳过")
+                    continue
                 r, g_r = calculate_rdf(
                     cg_data, bead_info_df, type1, type2,
                     bonds_df=bonds_df,
