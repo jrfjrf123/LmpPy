@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "lmp-py-react"
 version = "0.1.0"
 description = "LAMMPS Bond/React post-processing framework with CG mapping"
-readme = "samples_collection_md/LmpPy/README.md"
+readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
 authors = [
@@ -25,14 +25,29 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 
+# 核心路径 (run_refactored.py + core/ + utils/) 的导入期硬依赖。
+# lammps / mpi4py / numba 均有 try/except 降级，不在此列。
 dependencies = [
     "numpy>=1.20.0",
+    "pandas>=1.3.0",
     "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
 mpi = [
     "mpi4py>=3.1.0",
+]
+# output_analysis/ 与 scripts/ 下的统计绘图脚本
+analysis = [
+    "scipy>=1.7.0",
+    "matplotlib>=3.5.0",
+    "seaborn>=0.11.0",
+    "tqdm>=4.60.0",
+]
+# tools/ 下的 gmx 转换与 IBI 势函数拟合
+tools = [
+    "MDAnalysis>=2.0.0",
+    "scikit-optimize>=0.9.0",
 ]
 dev = [
     "pytest>=7.0",
@@ -42,9 +57,19 @@ dev = [
 [project.urls]
 Homepage = "https://github.com/user/lmp_py_react"
 
-[tool.setuptools.packages.find]
-where = ["samples_collection_md"]
-include = ["LmpPy*", "LmpPy.core*", "LmpPy.utils*"]
+# pyproject.toml 与包本体同级，故将 LmpPy 映射到项目根目录 "."
+[tool.setuptools]
+packages = [
+    "LmpPy",
+    "LmpPy.core",
+    "LmpPy.utils",
+    "LmpPy.tools",
+    "LmpPy.tools.aa2cg",
+    "LmpPy.tools.ibm_potential",
+    "LmpPy.tools.smooth_utils",
+    "LmpPy.output_analysis",
+]
+package-dir = {"LmpPy" = "."}
 
 [tool.setuptools.package-data]
-"LmpPy" = ["config/*.yaml", "docs/**/*.md"]
+"LmpPy" = ["config/*.yaml", "config/mapping/*.yaml", "docs/*.md"]
