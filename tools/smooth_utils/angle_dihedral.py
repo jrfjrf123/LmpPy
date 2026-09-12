@@ -33,8 +33,8 @@ def smooth_angle_with_harmonic_boundary(x: np.ndarray, P: np.ndarray,
     - 边界: θ → 0° 时 P → 0 (类似 bond 左边界)
     - 边界: θ → 180° 时 P → 0 (类似 bond 右边界)
 
-    复用 smooth_bond_with_harmonic_boundary 的逻辑,
-    仅在报告和度量中体现角度单位.
+    方法: 对全部实测区间保留 S-G 平滑结果; 谐振势墙仅用于无实测数据的
+    几何边界区（θ 小于/大于采样范围的部分）, 使 P 在边界平滑归零。
 
     Args:
         x: Coordinate array (degrees)
@@ -43,7 +43,7 @@ def smooth_angle_with_harmonic_boundary(x: np.ndarray, P: np.ndarray,
         idx_valid_end: End index of valid data range
         sg_window: Savitzky-Golay filter window size
         sg_poly: Savitzky-Golay polynomial order
-        threshold: P threshold for boundary definition
+        threshold: P threshold for core-region metrics (不参与 P 构造)
         F_max: Maximum force at boundary extremes (kcal/mol/degree)
         temperature: Temperature in Kelvin
         verbose: Whether to print debug information
@@ -92,54 +92,47 @@ def smooth_angle_with_harmonic_boundary(x: np.ndarray, P: np.ndarray,
         print(f"    Angle harmonic boundary: threshold={threshold}")
         print(f"    Core region: θ = [{x[left_core]:.1f}°, {x[right_core]:.1f}°]")
 
-    # Step 3: Compute U for core region
+    # Step 3: Compute U for connection-point estimation
     U_core = -kT * np.log(P_sg)
 
-    # Get connection point values
-    U_left = U_core[left_core]
-    F_all = -np.gradient(U_core, x)  # Force in kcal/mol/degree
-    F_left = F_all[left_core] if left_core > 0 else 0.0
-
-    U_right = U_core[right_core]
-    F_right = F_all[right_core] if right_core < n - 1 else 0.0
-
     # Step 4: Build result array
+    # 2026-09-12 修复：实测区间 [first_nz, last_nz] 全部保留 S-G 平滑结果，
+    # 不再用 P>=threshold 划"核心区"截断真实尾部。旧逻辑在核心边界把
+    # P~1e-3 的实测尾部替换为 F_max=500 的谐振墙，2 个 bin 内数值下溢成
+    # 断崖（等效 ~7 kcal/mol 势墙）。谐振墙现仅用于无实测数据的几何边界区。
     P_result = np.zeros(n)
+    P_result[first_nz:last_nz+1] = P_sg[first_nz:last_nz+1]
 
-    # Core region: use S-G smoothed P
-    P_result[left_core:right_core+1] = P_sg[left_core:right_core+1]
-
-    # === Left boundary: Harmonic potential ===
-    if left_core > first_nz:
-        theta_left = x[left_core]
-        theta_first = x[first_nz]
-        delta_theta = theta_left - theta_first
-
-        if delta_theta > 0:
-            k_left = (F_max - F_left) / delta_theta
-
-            for i in range(first_nz, left_core):
-                dtheta_from_left = theta_left - x[i]
-                U_harmonic = 0.5 * k_left * dtheta_from_left**2 + F_left * dtheta_from_left + U_left
-                P_result[i] = np.exp(-U_harmonic / kT)
-
-    # === Right boundary: Harmonic potential ===
-    if right_core < last_nz:
-        theta_right = x[right_core]
-        theta_last = x[last_nz]
-        delta_theta = theta_last - theta_right
+    # === Left boundary: Harmonic potential（仅无数据区 [x[0], first_nz)）===
+    if first_nz > 0:
+        theta_conn = x[first_nz]
+        U_conn = U_core[first_nz]
+        # 单侧差分估计连接点力（中央差分会引用零值区 clamp 出的假 U）
+        F_conn = -(U_core[first_nz + 1] - U_conn) / dtheta if first_nz < last_nz else 0.0
+        delta_theta = theta_conn - x[0]
 
         if delta_theta > 0:
-            k_right = (F_right + F_max) / delta_theta
+            k_left = max((F_max - F_conn) / delta_theta, 0.0)
 
-            for i in range(right_core + 1, last_nz + 1):
-                dtheta_from_right = x[i] - theta_right
-                U_harmonic = 0.5 * k_right * dtheta_from_right**2 - F_right * dtheta_from_right + U_right
+            for i in range(first_nz):
+                dtheta_from_conn = theta_conn - x[i]
+                U_harmonic = 0.5 * k_left * dtheta_from_conn**2 + F_conn * dtheta_from_conn + U_conn
                 P_result[i] = np.exp(-U_harmonic / kT)
 
-    # Zero regions
-    P_result[:first_nz] = 0.0
-    P_result[last_nz+1:] = 0.0
+    # === Right boundary: Harmonic potential（仅无数据区 (last_nz, x[-1]]）===
+    if last_nz < n - 1:
+        theta_conn = x[last_nz]
+        U_conn = U_core[last_nz]
+        F_conn = -(U_conn - U_core[last_nz - 1]) / dtheta if last_nz > first_nz else 0.0
+        delta_theta = x[-1] - theta_conn
+
+        if delta_theta > 0:
+            k_right = max((F_conn + F_max) / delta_theta, 0.0)
+
+            for i in range(last_nz + 1, n):
+                dtheta_from_conn = x[i] - theta_conn
+                U_harmonic = 0.5 * k_right * dtheta_from_conn**2 - F_conn * dtheta_from_conn + U_conn
+                P_result[i] = np.exp(-U_harmonic / kT)
 
     # Ensure non-negative
     P_result = np.maximum(P_result, 0.0)
