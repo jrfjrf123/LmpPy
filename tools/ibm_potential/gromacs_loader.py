@@ -569,9 +569,11 @@ def calculate_dihedral_distribution_vectorized(
         return delta
 
     # 四矢量
+    # 2026-09-12 修复（与 pickle_loader 同源 bug）：cd 原为 c-d 方向，二面角相对
+    # VOTCA/IUPAC 刚性偏移 180°；必须 bc 保持 b-c、cd 取 d-c 才与标量版一致。
     ba = pbc_vector(atom_b, atom_a)
     bc = pbc_vector(atom_b, atom_c)
-    cd = pbc_vector(atom_c, atom_d)
+    cd = pbc_vector(atom_d, atom_c)
 
     # 法向量
     n1 = np.cross(ba, bc)

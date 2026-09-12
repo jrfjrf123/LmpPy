@@ -436,9 +436,12 @@ def calculate_dihedral_distribution_vectorized(
         delta -= box_expand * np.round(delta / box_expand)
         return delta
 
+    # 2026-09-12 修复：cd 原为 c-d 方向，导致二面角相对 VOTCA/IUPAC 刚性偏移 180°。
+    # 注意该 atan2 写法的 y 分量符号正比于 -(s_ba*s_bc*s_cd)，必须 bc 保持 b-c、cd 取 d-c，
+    # 才与 distribution.py 标量版及 VOTCA EvaluateVar 一致（已数值验证）。
     ba = pbc_vector(atom_b, atom_a)
     bc = pbc_vector(atom_b, atom_c)
-    cd = pbc_vector(atom_c, atom_d)
+    cd = pbc_vector(atom_d, atom_c)
 
     # 法向量计算
     n1 = np.cross(ba, bc)
