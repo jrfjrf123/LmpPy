@@ -11,6 +11,9 @@
     python -m LmpPy.scripts.calc_dist --tpr topol.tpr --xtc traj.xtc --top-dir ./ --stride 10
     python -m LmpPy.scripts.calc_dist --tpr topol.tpr --trr traj.trr --stride 5 --parallel 4
 
+    # RDF 引擎选择（pair 分布；默认 auto=KDTree，与原版全对枚举逐 bin 等价）
+    python -m LmpPy.scripts.calc_dist --traj cg_trajectory.pkl --top-dir ./ --calc-pairs --rdf-engine allpairs
+
 输入文件格式:
     cg_bonds.txt:       bond_type atom1 atom2
     cg_angles.txt:      angle_type atom1 atom2 atom3
@@ -25,7 +28,8 @@
     r/theta/phi  probability  i
 
 作者: Claude
-日期: 2026-04-05 (更新: 2026-05-19 添加 GROMACS 支持)
+日期: 2026-04-05 (更新: 2026-05-19 添加 GROMACS 支持;
+      2026-10-09 整合 KDTree RDF 引擎 --rdf-engine，功能源自 calc_dist_kdtree.py)
 """
 
 import sys
@@ -82,6 +86,16 @@ try:
     HAS_PICKLE_VECTORIZED = True
 except ImportError:
     HAS_PICKLE_VECTORIZED = False
+
+# 可选导入 KDTree RDF 加速模块（与原版逐 bin 等价，仅正交盒）
+try:
+    from LmpPy.tools.ibm_potential.rdf_kdtree import (
+        calculate_rdf_kdtree_f32,
+        calculate_rdf_kdtree_f64,
+        HAS_KDTREE,
+    )
+except ImportError:
+    HAS_KDTREE = False
 
 
 def normalize_distribution(x: np.ndarray, hist: np.ndarray, mode: str = None) -> np.ndarray:
@@ -536,9 +550,9 @@ def run_pickle_vectorized_pipeline(args):
             save_votca_dist(str(output_file), phi, hist, args.normalize_mode)
             print(f"  dihedral_type{dihedral_type}: {len(dihedrals_of_type)} 二面角 -> {output_file.name}")
 
-    # 8. 向量化计算 RDF（可选）
+    # 8. 计算 RDF（按 --rdf-engine 分派）
     if args.calc_pairs and len(bead_info_df) > 0:
-        print("\n[Step 6] 计算 RDF（向量化）...")
+        print(f"\n[Step 6] 计算 RDF（{'KDTree' if args.rdf_engine == 'kdtree' else '向量化'}）...")
 
         # 构建 bead_info 数组
         bead_info_arr = bead_info_df[['bead_id', 'bead_type']].values
@@ -572,17 +586,32 @@ def run_pickle_vectorized_pipeline(args):
                     print(f"  RDF {type1}-{type2}: 已存在，跳过")
                     continue
 
-                r, g_r = calc_rdf_pickle(
-                    cache.coords_all, cache.box_all, bead_info_arr,
-                    type1, type2,
-                    exclusion_12=exclusion_12 if args.exclude_12 else None,
-                    exclusion_13=exclusion_13 if args.exclude_13 else None,
-                    exclusion_14=exclusion_14 if args.exclude_14 else None,
-                    n_bins=args.n_bins,
-                    r_range=tuple(args.pair_range),
-                    normalize=True,
-                    verbose=True
-                )
+                # kdtree: cKDTree 候选对 + 原版表达式重算距离，逐 bin 等价逐帧口径（串行）；
+                # allpairs: pickle_loader.calculate_rdf_vectorized 原向量化口径
+                if args.rdf_engine == 'kdtree':
+                    r, g_r = calculate_rdf_kdtree_f32(
+                        cache.coords_all, cache.box_all, bead_info_arr,
+                        type1, type2,
+                        exclusion_12=exclusion_12 if args.exclude_12 else None,
+                        exclusion_13=exclusion_13 if args.exclude_13 else None,
+                        exclusion_14=exclusion_14 if args.exclude_14 else None,
+                        n_bins=args.n_bins,
+                        r_range=tuple(args.pair_range),
+                        normalize=True,
+                        verbose=True
+                    )
+                else:
+                    r, g_r = calc_rdf_pickle(
+                        cache.coords_all, cache.box_all, bead_info_arr,
+                        type1, type2,
+                        exclusion_12=exclusion_12 if args.exclude_12 else None,
+                        exclusion_13=exclusion_13 if args.exclude_13 else None,
+                        exclusion_14=exclusion_14 if args.exclude_14 else None,
+                        n_bins=args.n_bins,
+                        r_range=tuple(args.pair_range),
+                        normalize=True,
+                        verbose=True
+                    )
 
                 if len(r) > 0:
                     output_file = output_dir / f"pair_type{type1}_{type2}.dist.tgt"
@@ -747,9 +776,9 @@ def run_pickle_pipeline(args):
             save_votca_dist(str(output_file), phi, hist, args.normalize_mode)
             print(f"  dihedral_type{dihedral_type}: {len(dihedrals_of_type)} 二面角 -> {output_file.name}")
 
-    # 8. RDF（逐帧模式，内存 O(n_pairs)）
+    # 8. RDF（按 --rdf-engine 分派；逐帧模式，内存友好）
     if args.calc_pairs and len(bead_info_df) > 0:
-        print("\n[Step 7] 计算 RDF（逐帧模式，内存友好）...")
+        print(f"\n[Step 7] 计算 RDF（{'KDTree' if args.rdf_engine == 'kdtree' else '逐帧模式'}，内存友好）...")
 
         bead_info_arr = bead_info_df[['bead_id', 'bead_type']].values
 
@@ -781,17 +810,32 @@ def run_pickle_pipeline(args):
                     print(f"  RDF {type1}-{type2}: 已存在，跳过")
                     continue
 
-                r, g_r = calc_rdf_pickle_fbf(
-                    cache.coords_all, cache.box_all, bead_info_arr,
-                    type1, type2,
-                    exclusion_12=exclusion_12 if args.exclude_12 else None,
-                    exclusion_13=exclusion_13 if args.exclude_13 else None,
-                    exclusion_14=exclusion_14 if args.exclude_14 else None,
-                    n_bins=args.n_bins,
-                    r_range=tuple(args.pair_range),
-                    normalize=True,
-                    verbose=True
-                )
+                # kdtree: cKDTree 候选对 + 原版表达式重算距离，与下方逐帧实现逐 bin 等价；
+                # allpairs: pickle_loader.calculate_rdf_frame_by_frame 原版逐帧实现
+                if args.rdf_engine == 'kdtree':
+                    r, g_r = calculate_rdf_kdtree_f32(
+                        cache.coords_all, cache.box_all, bead_info_arr,
+                        type1, type2,
+                        exclusion_12=exclusion_12 if args.exclude_12 else None,
+                        exclusion_13=exclusion_13 if args.exclude_13 else None,
+                        exclusion_14=exclusion_14 if args.exclude_14 else None,
+                        n_bins=args.n_bins,
+                        r_range=tuple(args.pair_range),
+                        normalize=True,
+                        verbose=True
+                    )
+                else:
+                    r, g_r = calc_rdf_pickle_fbf(
+                        cache.coords_all, cache.box_all, bead_info_arr,
+                        type1, type2,
+                        exclusion_12=exclusion_12 if args.exclude_12 else None,
+                        exclusion_13=exclusion_13 if args.exclude_13 else None,
+                        exclusion_14=exclusion_14 if args.exclude_14 else None,
+                        n_bins=args.n_bins,
+                        r_range=tuple(args.pair_range),
+                        normalize=True,
+                        verbose=True
+                    )
 
                 output_file = output_dir / f"pair_type{type1}_{type2}.dist.tgt"
                 save_votca_dist(str(output_file), r, g_r, args.normalize_mode)
@@ -815,6 +859,8 @@ def run_pipeline(args):
     print("分布计算脚本")
     print("=" * 60)
     print(f"并行进程数: {args.n_jobs}")
+    if args.rdf_engine == 'kdtree' and args.n_jobs != 1:
+        print(f"注意: KDTree 引擎为串行计算（已足够快），RDF 计算忽略 --n-jobs {args.n_jobs}")
 
     # 1. 加载轨迹
     print("\n加载轨迹...")
@@ -923,9 +969,9 @@ def run_pipeline(args):
             save_votca_dist(str(output_file), phi, hist, args.normalize_mode)
             print(f"  dihedral_type{dihedral_type}: {len(dihedrals_of_type)} 二面角 -> {output_file.name}")
 
-    # 7. 计算 Pair 分布（RDF）
+    # 7. 计算 Pair 分布（RDF，按 --rdf-engine 分派）
     if args.calc_pairs and len(bead_info_df) > 0:
-        print("\n计算 Pair 距离分布（排除 1-2/1-3/1-4）...")
+        print(f"\n计算 Pair 距离分布（{'KDTree，' if args.rdf_engine == 'kdtree' else ''}排除 1-2/1-3/1-4）...")
 
         # 获取所有 bead 类型
         unique_types = sorted(bead_info_df['bead_type'].unique())
@@ -937,19 +983,35 @@ def run_pipeline(args):
                 if (type1, type2) in skip_pair_types:
                     print(f"  pair type{type1}-{type2}: 已存在，跳过")
                     continue
-                r, g_r = calculate_rdf(
-                    cg_data, bead_info_df, type1, type2,
-                    bonds_df=bonds_df,
-                    angles_df=angles_df,
-                    dihedrals_df=dihedrals_df,
-                    exclude_bonds=args.exclude_12,
-                    exclude_angles=args.exclude_13,
-                    exclude_dihedrals=args.exclude_14,
-                    n_bins=args.n_bins,
-                    custom_range=tuple(args.pair_range),
-                    n_jobs=args.n_jobs,
-                    show_progress=True
-                )
+                # kdtree: cKDTree 候选对 + 原版表达式重算距离，逐 bin 等价（串行，忽略 n_jobs）；
+                # allpairs: distribution.calculate_rdf 原版全对枚举（支持 n_jobs 多进程）
+                if args.rdf_engine == 'kdtree':
+                    r, g_r = calculate_rdf_kdtree_f64(
+                        cg_data, bead_info_df, type1, type2,
+                        bonds_df=bonds_df,
+                        angles_df=angles_df,
+                        dihedrals_df=dihedrals_df,
+                        exclude_bonds=args.exclude_12,
+                        exclude_angles=args.exclude_13,
+                        exclude_dihedrals=args.exclude_14,
+                        n_bins=args.n_bins,
+                        custom_range=tuple(args.pair_range),
+                        show_progress=True
+                    )
+                else:
+                    r, g_r = calculate_rdf(
+                        cg_data, bead_info_df, type1, type2,
+                        bonds_df=bonds_df,
+                        angles_df=angles_df,
+                        dihedrals_df=dihedrals_df,
+                        exclude_bonds=args.exclude_12,
+                        exclude_angles=args.exclude_13,
+                        exclude_dihedrals=args.exclude_14,
+                        n_bins=args.n_bins,
+                        custom_range=tuple(args.pair_range),
+                        n_jobs=args.n_jobs,
+                        show_progress=True
+                    )
 
                 if len(r) > 0:
                     output_file = output_dir / f"pair_type{type1}_{type2}.dist.tgt"
@@ -1038,6 +1100,10 @@ def main():
                         help='使用全向量化计算（仅对 .pkl 格式有效，速度快但内存消耗大，默认关闭）')
     parser.add_argument('--ordered-bond-type', action='store_true',
                         help='测试模式：区分 bond 方向性，不合并 (type1,type2) 和 (type2,type1)')
+    parser.add_argument('--rdf-engine', choices=['auto', 'kdtree', 'allpairs'], default='auto',
+                        help='RDF(pair) 计算引擎: auto=优先 KDTree（无 scipy 时回退全对枚举）, '
+                             'kdtree=cKDTree 近邻候选（与原版逐 bin 等价，仅正交盒，串行）, '
+                             'allpairs=原版全对枚举。默认: auto。对 GROMACS 路径无效')
 
     # === 归一化参数（互斥） ===
     norm_group = parser.add_mutually_exclusive_group()
@@ -1054,6 +1120,17 @@ def main():
         args.normalize_mode = 'max'
     elif args.norm_area:
         args.normalize_mode = 'area'
+
+    # 解析 RDF 引擎：auto → 优先 KDTree（与原版逐 bin 等价），无 scipy 时回退
+    if args.rdf_engine == 'auto':
+        if HAS_KDTREE:
+            args.rdf_engine = 'kdtree'
+        else:
+            args.rdf_engine = 'allpairs'
+            print("提示: 未检测到 scipy (cKDTree)，RDF 引擎回退为 allpairs")
+    elif args.rdf_engine == 'kdtree' and not HAS_KDTREE:
+        print("错误: --rdf-engine kdtree 需要 scipy (cKDTree)")
+        return 1
 
     # 判断使用哪种格式
     if args.tpr and args.trj:

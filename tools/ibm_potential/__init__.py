@@ -59,6 +59,13 @@ from .dist_config import (
     DEFAULT_CONFIG
 )
 
+# KDTree RDF 加速（与原版逐 bin 等价；模块内置 scipy 检测，导入恒安全）
+from .rdf_kdtree import (
+    calculate_rdf_kdtree_f32,
+    calculate_rdf_kdtree_f64,
+    HAS_KDTREE
+)
+
 # 玻尔兹曼反演
 from .boltzmann import (
     KB,
@@ -146,6 +153,11 @@ __all__ = [
     'calculate_rdf',
     'calculate_all_distributions',
     'build_exclusion_pairs',
+
+    # KDTree RDF 加速
+    'calculate_rdf_kdtree_f32',
+    'calculate_rdf_kdtree_f64',
+    'HAS_KDTREE',
 
     # 玻尔兹曼反演
     'KB',
