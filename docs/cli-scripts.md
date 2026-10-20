@@ -349,16 +349,19 @@ python -m LmpPy.scripts.calc_ibm_potential_from_dist -d dist_output/ -t 400 --la
 
 | 子命令 | 功能 |
 |--------|------|
-| `trj` | GROMACS TRR 轨迹转换 |
+| `trj` | GROMACS TRR / LAMMPS dump 轨迹转换 |
 | `data` | LAMMPS data 文件转换 |
 | `gro` | GRO + TPR 结构文件转换 |
 
 ### trj 子命令参数
 
+`--tpr/--trr`（GROMACS 路径）与 `--dump`（LAMMPS 路径）二选一。
+
 | 参数 | 说明 |
 |------|------|
-| `--tpr PATH` | GROMACS TPR 拓扑文件 |
-| `--trr PATH` | GROMACS TRR 轨迹文件 |
+| `--tpr PATH` | GROMACS TPR 拓扑文件（需与 `--trr` 一起给出） |
+| `--trr PATH` | GROMACS TRR 轨迹文件（需与 `--tpr` 一起给出） |
+| `--dump PATH` | LAMMPS dump 轨迹文件。要求 `ITEM: ATOMS` 段含 `id type x y z` 列、原子 id 连续 1..N；**坐标单位 Å 原样保留**（不做 GROMACS 路径的 nm 换算）；三斜盒显式报错 |
 | `--mapping PATH` | CG 映射 CSV 文件 |
 | `-o PATH` | 输出 CG 轨迹 pickle 文件 |
 | `--stride N` | 帧间隔 |
@@ -402,6 +405,12 @@ python -m LmpPy.scripts.calc_ibm_potential_from_dist -d dist_output/ -t 400 --la
 python -m LmpPy.scripts.convert_aa2cg trj \
     --tpr topol.tpr \
     --trr traj.trr \
+    --mapping mapping.csv \
+    -o cg_trajectory.pkl
+
+# 转换轨迹（LAMMPS dump；坐标 Å 原样保留）
+python -m LmpPy.scripts.convert_aa2cg trj \
+    --dump cg_trajectory.lammpstrj \
     --mapping mapping.csv \
     -o cg_trajectory.pkl
 
