@@ -213,6 +213,54 @@ def iter_lammps_dump_frames(path: str, max_frames: Optional[int] = None):
                 return
 
 
+def resolve_output_file(md_dir: Path, config_key: str,
+                        default_name: str) -> Optional[Path]:
+    """定位 md 目录下的 LmpPy 输出文件，带顶层/output/ 布局回退。
+
+    背景: 新版 LmpPy 遵守 lammps_params.yaml 中 files.output_* 的声明
+    (如 ``output_cg_trajectory: "output/cg_trajectory.lammpstrj"``),
+    旧版无视该声明、一律写在 md 目录顶层。实际数据两种布局并存
+    (如 aam_aac with_constraint_aa: chunk1-12 在顶层, chunk13-61 在
+    output/), 而两种布局的 yaml 声明完全相同。本函数按
+    「yaml 声明路径 → 顶层 → output/」的候选顺序返回第一个存在的路径,
+    与 scripts/fix_LmpPy_data/output_locator.py 语义一致。
+
+    参数:
+        md_dir: MD 目录。含 lammps_params.yaml 时优先按其声明定位;
+            不含(或解析失败)时只用顶层/output/ 两个回退候选
+        config_key: lammps_params.yaml 中 files 段的键名,
+            如 ``output_cg_trajectory``
+        default_name: 文件名缺省值(顶层布局的文件名),
+            如 ``cg_trajectory.lammpstrj``
+
+    返回:
+        定位到的路径; 所有候选都不存在时返回 None (由调用方决定报错方式)
+    """
+    import yaml as _yaml
+
+    md_dir = Path(md_dir)
+
+    declared = None
+    params = md_dir / "lammps_params.yaml"
+    if params.exists():
+        try:
+            files = (_yaml.safe_load(params.read_text()) or {}).get("files") or {}
+            declared = files.get(config_key)
+        except Exception:
+            declared = None
+
+    candidates = []
+    for rel in (declared, default_name, f"output/{default_name}"):
+        if rel and rel not in candidates:
+            candidates.append(rel)
+
+    for rel in candidates:
+        candidate = md_dir / rel
+        if candidate.exists():
+            return candidate
+    return None
+
+
 if __name__ == "__main__":
     import tempfile
 

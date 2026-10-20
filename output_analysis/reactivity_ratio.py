@@ -219,7 +219,7 @@ def collect_per_cycle_counts_aa(
     pd.DataFrame: traj, cycle(轨迹内连续帧序号), timestep, n1..n6,
         E35,E36,E45,E46, N11,N12,N21,N22
     """
-    from LmpPy.utils.file_utils import iter_lammps_dump_frames
+    from LmpPy.utils.file_utils import iter_lammps_dump_frames, resolve_output_file
 
     md_dirs: List[Path] = []
     for root in aa_dirs:
@@ -257,9 +257,14 @@ def collect_per_cycle_counts_aa(
         n_traj_rows = 0
         for md_dir in dirs:
             npz_path = md_dir / "reaction_frames.npz"
-            traj = md_dir / "cg_trajectory.lammpstrj"
-            if not traj.exists():
-                raise FileNotFoundError(f"未找到轨迹文件: {traj}")
+            # cg_trajectory 布局回退: 旧版 LmpPy 写在 md 顶层,
+            # 新版按 lammps_params.yaml 声明写入 output/ 子目录
+            traj = resolve_output_file(
+                md_dir, "output_cg_trajectory", "cg_trajectory.lammpstrj")
+            if traj is None:
+                raise FileNotFoundError(
+                    f"未找到轨迹文件(已尝试 yaml 声明/顶层/output/): "
+                    f"{md_dir}/cg_trajectory.lammpstrj")
 
             d = np.load(npz_path, allow_pickle=True)
             # timestep -> 该帧新增键的通道列表(每帧通常恰好一个事件)
@@ -537,6 +542,17 @@ def _nan_to_none(obj):
     return obj
 
 
+def _fmt_ratio(num: float, den: float, prec: int = 3) -> str:
+    """安全格式化比率 num/den 为显示字符串。
+
+    分母为 0(或近 0)时不做除法:分子>0 显示 "inf",0/0 显示 "n/a"。
+    仅用于图标题/报告等展示文本,不影响任何数值计算。
+    """
+    if den == 0:
+        return "inf" if num > 0 else "n/a"
+    return f"{num / den:.{prec}f}"
+
+
 def plot_r_vs_conversion(
     win_tables: Dict[int, pd.DataFrame],
     global_est: Dict[str, float],
@@ -617,8 +633,10 @@ def plot_channel_rates(df: pd.DataFrame, out_path: Path) -> None:
     ax2.axhline(0, color="gray", lw=0.5)
 
     fig.suptitle(
-        f"Channel rates:  r1_bulk={rho[0]/rho[1]:.3f}, r1_cand={pi[0]/pi[1]:.3f} | "
-        f"r2_bulk={rho[3]/rho[2]:.3f}, r2_cand={pi[3]/pi[2]:.3f}",
+        f"Channel rates:  r1_bulk={_fmt_ratio(rho[0], rho[1])}, "
+        f"r1_cand={_fmt_ratio(pi[0], pi[1])} | "
+        f"r2_bulk={_fmt_ratio(rho[3], rho[2])}, "
+        f"r2_cand={_fmt_ratio(pi[3], pi[2])}",
         fontsize=10,
     )
     fig.tight_layout()
@@ -953,8 +971,8 @@ def write_detailed_report(
                      f"{n_events[ch]} ({pct:.2f}%)")
     lines.append(f"  事件总数: {n_total}")
     if n_total:
-        lines.append(f"  N11/N12 = {n_events['11'] / n_events['12']:.4f}  "
-                     f"N22/N21 = {n_events['22'] / n_events['21']:.4f}")
+        lines.append(f"  N11/N12 = {_fmt_ratio(n_events['11'], n_events['12'], 4)}  "
+                     f"N22/N21 = {_fmt_ratio(n_events['22'], n_events['21'], 4)}")
 
     lines.append("\n## 浓度统计 (每 cycle 帧)")
     for col, label in [("n5", "n5 (A 单体)"), ("n6", "n6 (B 单体)")]:
