@@ -3,8 +3,11 @@
 AA到CG转换工具 CLI
 
 用法:
-    # 转换轨迹
+    # 转换轨迹（GROMACS TRR）
     python -m LmpPy.scripts.convert_aa2cg trj --tpr topol.tpr --trr traj.trr --mapping mapping.csv -o cg_traj.pkl
+
+    # 转换轨迹（LAMMPS dump；坐标单位 Å 原样保留，要求 ITEM: ATOMS 含 id type x y z 列）
+    python -m LmpPy.scripts.convert_aa2cg trj --dump cg_trajectory.lammpstrj --mapping mapping.csv -o cg_traj.pkl
 
     # 转换data文件（使用预计算的拓扑文件）
     python -m LmpPy.scripts.convert_aa2cg data --input system.data --mapping mapping.csv --bonds cg_bonds.txt
@@ -39,6 +42,7 @@ if _project_root not in sys.path:
 
 from LmpPy.tools.aa2cg import (
     read_gromacs_trr_all_frames,
+    read_lammps_dump_frames,
     convert_trajectory_to_cg,
     save_cg_trajectory_pickle,
     load_cg_trajectory_pickle,
@@ -134,15 +138,22 @@ def cmd_convert_trajectory(args):
     print("="*60)
     print("AA轨迹 → CG轨迹转换")
     print("="*60)
-    print(f"TPR文件: {args.tpr}")
-    print(f"TRR文件: {args.trr}")
+    if args.dump:
+        print(f"Dump文件: {args.dump}")
+    else:
+        print(f"TPR文件: {args.tpr}")
+        print(f"TRR文件: {args.trr}")
     print(f"映射文件: {args.mapping}")
     print(f"输出文件: {args.output}")
     print(f"帧间隔: {args.stride}")
 
     # 读取AA轨迹
     print("\n读取AA轨迹...")
-    aa_frames = read_gromacs_trr_all_frames(args.tpr, args.trr, stride=args.stride)
+    if args.dump:
+        # LAMMPS dump 路径：坐标单位 Å 原样保留（不做 nm 换算）
+        aa_frames = read_lammps_dump_frames(args.dump, stride=args.stride)
+    else:
+        aa_frames = read_gromacs_trr_all_frames(args.tpr, args.trr, stride=args.stride)
     print(f"  共 {len(aa_frames)} 帧")
 
     # 转换为CG
@@ -453,9 +464,12 @@ def main():
     subparsers = parser.add_subparsers(dest='command', help='子命令')
 
     # 轨迹转换子命令
-    trj_parser = subparsers.add_parser('trj', help='轨迹转换')
-    trj_parser.add_argument('--tpr', required=True, help='TPR拓扑文件')
-    trj_parser.add_argument('--trr', required=True, help='TRR轨迹文件')
+    trj_parser = subparsers.add_parser('trj', help='轨迹转换（GROMACS TRR 或 LAMMPS dump）')
+    trj_parser.add_argument('--tpr', help='TPR拓扑文件（GROMACS 路径，需与 --trr 一起给出）')
+    trj_parser.add_argument('--trr', help='TRR轨迹文件（GROMACS 路径，需与 --tpr 一起给出）')
+    trj_parser.add_argument('--dump', help='LAMMPS dump 轨迹文件（与 --tpr/--trr 二选一）。'
+                            '要求 ITEM: ATOMS 段含 id type x y z 列且原子 id 连续 1..N；'
+                            '坐标单位 Å 原样保留')
     trj_parser.add_argument('--mapping', '-m', required=True, help='CG映射CSV文件')
     trj_parser.add_argument('--output', '-o', default='cg_trajectory.pkl', help='输出文件')
     trj_parser.add_argument('--stride', type=int, default=1, help='帧间隔')
@@ -510,6 +524,9 @@ def main():
     args = parser.parse_args()
 
     if args.command == 'trj':
+        # 输入校验: --dump 与 (--tpr + --trr) 二选一
+        if bool(args.dump) == bool(args.tpr and args.trr):
+            parser.error('trj 子命令需要且仅需要一种输入: --dump，或 --tpr 与 --trr 一起给出')
         return cmd_convert_trajectory(args)
     elif args.command == 'data':
         return cmd_convert_data(args)

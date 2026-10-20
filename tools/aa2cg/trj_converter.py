@@ -292,6 +292,60 @@ def read_lammps_dump(dump_file: str, frame_stride: int = 1) -> Dict:
     return frames
 
 
+def read_lammps_dump_frames(dump_file: str, stride: int = 1) -> List[Dict]:
+    """
+    读取LAMMPS dump轨迹为AA帧列表（供convert_trajectory_to_cg使用）。
+
+    基于 LmpPy.utils.file_utils.iter_lammps_dump_frames（流式逐帧解析、
+    按 ITEM: ATOMS 列名读取，比本模块 read_lammps_dump 快约 3-4 倍，
+    单帧驻留内存）；显式拒绝三斜(triclinic)盒子。
+
+    与 GROMACS 路径(read_gromacs_trr_all_frames)不同，坐标不做单位换算：
+    dump 按 LAMMPS real 单位(Å)原样返回。
+
+    Args:
+        dump_file: dump 文件路径（要求 ITEM: ATOMS 段含 id type x y z 列）
+        stride: 帧间隔（按文件内帧序号）
+
+    Returns:
+        帧数据列表，每帧 dict 含 'ids'/'types'/'coords'/'box'/'natoms'/'frame'，
+        结构对齐 read_gromacs_trr_all_frames 输出（无 'time'/'mol_ids'）
+
+    Raises:
+        ValueError: 某帧原子 ID 非连续 1..N（映射 CSV 的 AA_id 以
+            1-based 连续编号为前提，convert_aa_to_cg_frame 按 AA_id-1
+            直接索引坐标数组）
+    """
+    from LmpPy.utils.file_utils import iter_lammps_dump_frames
+
+    aa_frames: List[Dict] = []
+    for actual_idx, fr in enumerate(iter_lammps_dump_frames(dump_file)):
+        if actual_idx % stride != 0:
+            continue
+        ids = fr['ids']
+        order = np.argsort(ids, kind='stable')
+        ids_sorted = ids[order]
+        n = len(ids_sorted)
+        if n > 0 and not np.array_equal(
+                ids_sorted, np.arange(1, n + 1, dtype=ids_sorted.dtype)):
+            raise ValueError(
+                f"timestep {fr['timestep']}: 原子 ID 非连续 1..{n}"
+                f"（排序后首/末 id = {ids_sorted[0]}/{ids_sorted[-1]}）。"
+                f"映射 CSV 的 AA_id 以 1-based 连续编号为前提，"
+                f"请先规整 dump 的原子 id")
+        aa_frames.append({
+            'ids': ids_sorted,
+            'types': fr['types'][order],
+            'coords': fr['coords'][order],
+            'box': fr['box'],
+            'natoms': n,
+            'frame': len(aa_frames),
+        })
+
+    print(f"从 {dump_file} 读取 {len(aa_frames)} 帧 (stride={stride})")
+    return aa_frames
+
+
 def read_gromacs_trr(tpr_file: str, trr_file: str, frame_idx: int = 0,
                      make_whole: bool = False) -> Dict:
     """

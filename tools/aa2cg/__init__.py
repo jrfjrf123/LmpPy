@@ -59,6 +59,7 @@ from .data_converter import (
 # 轨迹转换
 from .trj_converter import (
     read_lammps_dump,
+    read_lammps_dump_frames,
     read_gromacs_trr,
     read_gromacs_trr_all_frames,
     convert_trajectory_to_cg,
@@ -97,6 +98,7 @@ __all__ = [
 
     # 轨迹转换
     'read_lammps_dump',
+    'read_lammps_dump_frames',
     'read_gromacs_trr',
     'read_gromacs_trr_all_frames',
     'convert_trajectory_to_cg',
