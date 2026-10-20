@@ -947,6 +947,8 @@ class IBMConfig:
 | `calculate_angle_distribution(cg_data, angle_pairs)` | — | `(theta, hist)` | 计算角度分布 |
 | `calculate_dihedral_distribution(cg_data, dihedral_pairs)` | — | `(phi, hist)` | 计算二面角分布 |
 | `calculate_rdf(cg_data, pair_types, dr)` | — | `(r, g_r)` | 计算 RDF |
+| `calculate_rdf_kdtree_f32(coords_all, box_all, bead_info_arr, type1, type2, exclusion_*, n_bins, r_range)` | — | `(r, g_r)` | KDTree 加速 RDF（pkl/float32 口径，与逐帧原版逐 bin 等价；`rdf_kdtree.py`） |
+| `calculate_rdf_kdtree_f64(cg_data, bead_info, type1, type2, bonds_df, ...)` | — | `(r, g_r)` | KDTree 加速 RDF（lammpstrj/float64 口径，与 `calculate_rdf` 逐 bin 等价；`rdf_kdtree.py`） |
 | `calculate_bond_potential(r, hist, temperature=400, units='kcal/mol', jacobian_correction=True)` | `r, hist: np.ndarray, temperature: float, ...` | `(r, potential)` | 玻尔兹曼反演得到键势能 |
 | `calculate_angle_potential(theta, hist, temperature=400, units='kcal/mol', jacobian_correction=True)` | 同上 | `(theta, potential)` | 角度势能 |
 | `calculate_dihedral_potential(phi, hist, temperature=400, units='kcal/mol')` | 同上 | `(phi, potential)` | 二面角势能 |

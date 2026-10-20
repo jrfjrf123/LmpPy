@@ -188,10 +188,11 @@ python -m LmpPy.scripts.build_cg_system \
 | `--calc-pairs` | 计算所有 bead type 对的距离分布（排除 1-2/1-3/1-4） | 关闭 |
 | `--pair-range MIN MAX` | Pair 距离范围 | 3.0 15.0 |
 | `--exclude-12` / `--exclude-13` / `--exclude-14` | 排除 1-2 / 1-3 / 1-4 对 | 关闭 |
-| `--n-jobs N` | 并行进程数（仅用于 RDF 计算） | 1（串行） |
+| `--n-jobs N` | 并行进程数（仅 lammpstrj 路径 + `--rdf-engine allpairs` 的 RDF 计算；KDTree 引擎串行忽略此项） | 1（串行） |
 | `--skip-existing` | 跳过已存在的输出文件 | 关闭 |
 | `--vectorized` | 全向量化计算（仅对 `.pkl` 有效，快但费内存） | 关闭 |
 | `--ordered-bond-type` | 测试模式：区分键方向性，不合并 (t1,t2) 与 (t2,t1) | 关闭 |
+| `--rdf-engine {auto,kdtree,allpairs}` | RDF 引擎：`auto`=优先 KDTree（无 scipy 回退 allpairs）；`kdtree`=cKDTree 近邻候选加速（与全对枚举逐 bin 等价，串行，仅正交盒）；`allpairs`=原版全对枚举。GROMACS 路径不受影响 | `auto` |
 | `--norm-max` / `--norm-area` | 最大值归一化 / 面积归一化（互斥） | 关闭 |
 
 **输入文件格式**：
@@ -209,6 +210,19 @@ python -m LmpPy.scripts.build_cg_system \
 r/theta/phi  probability  i
 ```
 
+**RDF 引擎**（2026-10-09 起；仅 `--calc-pairs` 的 pair 分布涉及，GROMACS 路径不受影响）：
+
+- `kdtree`（默认，`auto` 在有 scipy 时解析为此）：cKDTree 周期性近邻查询选出候选对
+  （查询半径 r_max+1e-4 Å 保证超集），再用原版同一 numpy 表达式重算距离，
+  与 `allpairs` **逐 bin 完全一致**；串行、内存 O(候选对数)。实测 lammpstrj 路径
+  1309 s / 峰值 189 GB → 19 s / 0.65 GB（68× 加速）。实现：`LmpPy/tools/ibm_potential/rdf_kdtree.py`；
+  等价性验证记录：`data2/mlcgsim_run/pip/large_monomers_system/3w_monomers_system/analysis/README.md` §E。
+- `allpairs`：原版全对枚举实现，保留用于回退与严格复现历史结果；
+  仅此引擎的 lammpstrj 路径支持 `--n-jobs` 多进程。
+- 注意：`--vectorized` + `allpairs` 走 `pickle_loader.calculate_rdf_vectorized` 口径，
+  与逐帧/kdtree 口径存在 ~1e-6 级浮点差（原版两路径固有差异，非引擎问题）；
+  kdtree 引擎在加不加 `--vectorized` 下输出一致。
+
 **使用示例**：
 
 ```bash
@@ -220,8 +234,11 @@ python -m LmpPy.scripts.calc_dist --traj cg_trajectory.lammpstrj --top-dir ./ --
 python -m LmpPy.scripts.calc_dist --tpr topol.tpr --xtc traj.xtc --top-dir ./ --stride 10
 python -m LmpPy.scripts.calc_dist --tpr topol.tpr --trr traj.trr --stride 5 --unit nm
 
-# 计算 pair 分布并并行加速
-python -m LmpPy.scripts.calc_dist --traj traj.pkl --top-dir ./ --calc-pairs --n-jobs 8
+# 计算 pair 分布（默认 KDTree 引擎，大体系推荐）
+python -m LmpPy.scripts.calc_dist --traj traj.pkl --top-dir ./ --calc-pairs
+
+# 严格复现历史结果：回退原版全对枚举（lammpstrj 路径可多进程）
+python -m LmpPy.scripts.calc_dist --traj traj.lammpstrj --top-dir ./ --calc-pairs --rdf-engine allpairs --n-jobs 8
 
 # 增量重跑：跳过已算好的分布文件
 python -m LmpPy.scripts.calc_dist --traj traj.pkl --top-dir ./ --skip-existing
@@ -360,6 +377,9 @@ python -m LmpPy.scripts.calc_ibm_potential_from_dist -d dist_output/ -t 400 --la
 | `--derive-topology` | 从 AA 键自动推导 CG 拓扑（bonds/angles/dihedrals） |
 | `--output-cg-topology DIR` | 输出 CG 拓扑文件目录 |
 | `--type-mapping PATH` | YAML 类型映射文件（仅 `--derive-topology` 下生效） |
+| `--ff-yaml PATH` | CG 力场 YAML（LAMMPS real 单位）。给出时额外导出 GROMACS 三件套 `system.gro` + `topol.top` + `cg.itp` |
+| `--gmx-out DIR` | GROMACS 文件输出目录（默认与 `--output` 同目录，仅 `--ff-yaml` 时生效） |
+| `--mdfmt-path DIR` | MD_format_transform 仓库根目录（缺省取环境变量 `MDFMT_PATH`，仅 `--ff-yaml` 时生效） |
 | `--xyz` | 同时输出 XYZ 格式 |
 
 ### gro 子命令参数
@@ -399,12 +419,48 @@ python -m LmpPy.scripts.convert_aa2cg data \
     --derive-topology --output-cg-topology . \
     --xyz
 
+# Data 文件转换 + 导出 GROMACS 三件套（system.gro + topol.top + cg.itp）
+python -m LmpPy.scripts.convert_aa2cg data \
+    --input system.data \
+    --mapping mapping.csv \
+    --derive-topology \
+    --ff-yaml cg_ff.yaml \
+    --mdfmt-path /path/to/MD_format_transform
+
 # GRO + TPR 转换
 python -m LmpPy.scripts.convert_aa2cg gro \
     --gro system.gro \
     --tpr topol.tpr \
     --mapping mapping.csv \
     -o cg.data
+```
+
+**CG 力场 YAML（`--ff-yaml`）格式**：
+
+- 输入单位固定为 LAMMPS real（Å、kcal/mol、度），写出时统一换算为 GROMACS 单位
+  （nm、kJ/mol）；键/角力常数按 LAMMPS `E=K(x-x0)^2` → GROMACS `E=½k(x-x0)^2`
+  形式差异额外乘 2（键再乘 100 的 Å²→nm²）
+- `atomtypes`：每种 bead type 必填，σ/ε 为对角 LJ 参数；`mass` 缺省由 mapping 质量求和
+- 非对角 LJ 对默认由 GROMACS comb-rule 3（Lorentz-Berthelot：σ 算术、ε 几何）自动混合；
+  仅 `nonbonded_overrides` 中显式给出的对写入 `[nonbond_params]`（自动换算 c6/c12）
+- `bonds`/`angles`/`dihedrals`：按 `bead_types` 组合键控（对称规范化），当前仅支持
+  harmonic；可选 `type_id` 钉死拓扑编号（兼任 `--type-mapping`）
+- 体系中出现的每个 bead type / 拓扑组合都必须有参数，缺失时全部列出并报错
+
+```yaml
+units: lammps-real
+nrexcl: 3
+atomtypes:
+  - {type: 1, name: A, mass: 54.09, sigma: 4.42, epsilon: 0.233}
+  - {type: 2, name: B, sigma: 4.38, epsilon: 0.200}   # mass 缺省自动求和
+nonbonded_overrides:
+  - {types: [1, 2], sigma: 4.40, epsilon: 0.215}
+bonds:
+  - {bead_types: [1, 2], r0: 3.80, k: 150.0}
+angles:
+  - {bead_types: [1, 2, 2], theta0: 112.0, k: 40.0}
+dihedrals:
+  - {bead_types: [1, 2, 2, 1], phi0: 180.0, k: 3.0, multiplicity: 1}
 ```
 
 ---
