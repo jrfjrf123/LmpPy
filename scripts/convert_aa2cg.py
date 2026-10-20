@@ -19,6 +19,10 @@ AA到CG转换工具 CLI
     # 转换data文件并输出XYZ（unwrap格式）
     python -m LmpPy.scripts.convert_aa2cg data --input system.data --mapping mapping.csv --xyz
 
+    # 转换data文件并导出 GROMACS 三件套（system.gro + topol.top + cg.itp）
+    python -m LmpPy.scripts.convert_aa2cg data --input system.data --mapping mapping.csv \\
+        --derive-topology --ff-yaml cg_ff.yaml --mdfmt-path /path/to/MD_format_transform
+
 作者: Claude
 日期: 2026-04-02
 """
@@ -46,6 +50,7 @@ from LmpPy.tools.aa2cg import (
     derive_cg_topology,
     export_cg_topology,
 )
+from LmpPy.tools.aa2cg.cg_universe import export_cg_gromacs
 
 # 导入 GRO 文件读取（项目根目录）
 try:
@@ -236,6 +241,17 @@ def cmd_convert_data(args):
         cg_data.get('bonds'), cg_data.get('angles'), cg_data.get('dihedrals'),
         mass_list=cg_mass_dict
     )
+
+    # 可选：导出 GROMACS 三件套（system.gro + topol.top + cg.itp）
+    if args.ff_yaml:
+        print("\n导出 GROMACS 文件...")
+        gmx_out = args.gmx_out if args.gmx_out else str(Path(args.output).resolve().parent)
+        export_cg_gromacs(
+            cg_data, args.ff_yaml, gmx_out,
+            auto_masses=cg_mass_dict,
+            title=Path(args.input).stem,
+            mdfmt_path=args.mdfmt_path
+        )
 
     # 可选：输出XYZ（unwrap格式）
     if args.xyz:
@@ -464,6 +480,15 @@ def main():
     data_parser.add_argument('--type-mapping', metavar='YAML',
                              help='YAML 文件路径，bead type 组合 → 拓扑类型映射表'
                                   '（仅 --derive-topology 模式下生效）')
+    data_parser.add_argument('--ff-yaml', metavar='YAML',
+                             help='CG 力场 YAML（LAMMPS real 单位，含 atomtypes 的 σ/ε、'
+                                  'harmonic bonds/angles/dihedrals、可选 nonbonded_overrides）。'
+                                  '给出时额外导出 GROMACS 三件套 system.gro + topol.top + cg.itp')
+    data_parser.add_argument('--gmx-out', metavar='DIR',
+                             help='GROMACS 文件输出目录（默认与 --output 同目录，仅 --ff-yaml 时生效）')
+    data_parser.add_argument('--mdfmt-path', metavar='DIR',
+                             help='MD_format_transform 仓库根目录（缺省取环境变量 MDFMT_PATH，'
+                                  '仅 --ff-yaml 时生效）')
 
     # GRO文件转换子命令
     gro_parser = subparsers.add_parser('gro', help='GRO结构文件转换（需TPR拓扑）')

@@ -69,6 +69,10 @@ from .trj_converter import (
     write_trajectory_to_xyz
 )
 
+# GROMACS 导出（system.gro + topol.top + cg.itp；mdfmt 延迟导入，缺省不影响其余功能）
+from .cg_ff import load_cg_ff, validate_ff_completeness, CgForceField, CgFFError
+from .cg_universe import export_cg_gromacs, build_cg_universe, ensure_mdfmt
+
 __all__ = [
     # 映射工具
     'load_aa_to_cg_mapping',
@@ -100,5 +104,14 @@ __all__ = [
     'save_cg_trajectory_pickle',
     'load_cg_trajectory_pickle',
     'write_frame_to_xyz',
-    'write_trajectory_to_xyz'
+    'write_trajectory_to_xyz',
+
+    # GROMACS 导出
+    'load_cg_ff',
+    'validate_ff_completeness',
+    'CgForceField',
+    'CgFFError',
+    'export_cg_gromacs',
+    'build_cg_universe',
+    'ensure_mdfmt'
 ]
